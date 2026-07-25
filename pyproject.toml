@@ -5,7 +5,11 @@ description = "End-to-end IoT telemetry pipeline for an ESP32 planter sensor pod
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "paho-mqtt>=2.1",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.10",
+]
 
 [dependency-groups]
 dev = [
@@ -42,6 +46,7 @@ select = [
 
 [tool.mypy]
 strict = true
+plugins = ["pydantic.mypy"]
 files = ["$MYPY_CONFIG_FILE_DIR/src", "$MYPY_CONFIG_FILE_DIR/tests"]
 
 [tool.pytest.ini_options]
