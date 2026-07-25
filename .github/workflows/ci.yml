@@ -34,10 +34,13 @@ jobs:
       - name: Test
         run: make test
 
-  broker-smoke:
+  compose-smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Broker pub/sub round-trip
         run: make smoke
+
+      - name: Simulator stream reaches the broker
+        run: make sim-smoke
