@@ -119,7 +119,12 @@ def build_streams(settings: SimulatorSettings, start: datetime) -> Iterator[Emis
         dynamics_rng = random.Random(f"{settings.seed}:{device_id}:dynamics")
         imperfection_rng = random.Random(f"{settings.seed}:{device_id}:imperfections")
         params = draw_device_params(dynamics_rng)
-        phase = timedelta(seconds=settings.interval_seconds * index / settings.device_count)
+        # Phase comes from a per-device RNG, not from index/device_count:
+        # deriving it from the fleet size would shift every device's
+        # measured_at series — and thus the (device_id, measured_at)
+        # idempotency keys — whenever SIM_DEVICE_COUNT changes.
+        phase_rng = random.Random(f"{settings.seed}:{device_id}:phase")
+        phase = timedelta(seconds=phase_rng.random() * settings.interval_seconds)
         readings = device_readings(device_id, params, dynamics_rng, start + phase, interval)
         streams.append(device_emissions(readings, imperfection_rng, settings))
     return merged_emissions(streams)

@@ -7,8 +7,10 @@ acceptable for the synthetic demo, and it keeps the generation layers pure.
 """
 
 import logging
+import signal
 import time
 from datetime import UTC, datetime
+from types import FrameType
 
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
@@ -31,6 +33,11 @@ def connect_with_retry(
     handles reconnects on broker restarts.
     """
     client = mqtt.Client(CallbackAPIVersion.VERSION2)
+    # Default is unbounded; during a long broker outage the simulator keeps
+    # producing, so cap the in-memory QoS 1 queue. Once full, publish()
+    # returns MQTT_ERR_QUEUE_SIZE and the message is dropped — fine for
+    # synthetic telemetry, and run() logs the failure.
+    client.max_queued_messages_set(1000)
     for attempt in range(1, attempts + 1):
         try:
             client.connect(settings.mqtt_host, settings.mqtt_port)
@@ -51,9 +58,17 @@ def connect_with_retry(
     raise AssertionError("unreachable")
 
 
+def _raise_keyboard_interrupt(signum: int, frame: FrameType | None) -> None:
+    raise KeyboardInterrupt
+
+
 def run(settings: SimulatorSettings) -> None:
     """Publish the emission stream forever, pacing it by the wall clock."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # `docker compose stop/down` sends SIGTERM; route it through the same
+    # KeyboardInterrupt path as Ctrl-C so the finally block disconnects
+    # cleanly instead of the interpreter dying mid-publish.
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     logger.info(
         "starting: %d devices, seed=%d, acceleration=%gx, interval=%gs (virtual)",
         settings.device_count,
@@ -76,7 +91,16 @@ def run(settings: SimulatorSettings) -> None:
             if emission.corruption is not None:
                 payload = corrupt(payload, emission.corruption)
             topic = telemetry_topic(emission.reading.device_id)
-            client.publish(topic, payload, qos=1)
+            result = client.publish(topic, payload, qos=1)
+            if result.rc != mqtt.MQTT_ERR_SUCCESS:
+                # paho queues the message for redelivery once the connection
+                # is back; log honestly instead of pretending it went out.
+                logger.warning(
+                    "publish to %s failed (%s), queued for reconnect",
+                    topic,
+                    mqtt.error_string(result.rc),
+                )
+                continue
             logger.info(
                 "%s %s%s water=%.1f%% battery=%.3fV measured_at=%s",
                 topic,
