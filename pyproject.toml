@@ -1,0 +1,45 @@
+[project]
+name = "planter-telemetry"
+version = "0.1.0"
+description = "End-to-end IoT telemetry pipeline for an ESP32 planter sensor pod: MQTT ingestion, TimescaleDB storage, provisioned Grafana dashboards, and refill forecasting."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "mypy>=1.16",
+    "pytest>=8.4",
+    "ruff>=0.12",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/planter_telemetry"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
