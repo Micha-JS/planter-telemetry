@@ -39,6 +39,10 @@ smoke:
 sim-smoke:
 	docker compose up -d --build
 	docker compose exec -T mosquitto sh -ec ' \
+		for i in $$(seq 1 30); do \
+			mosquitto_pub -t planter/ready -m ping 2>/dev/null && break; \
+			sleep 1; \
+		done; \
 		mosquitto_sub -t "planter/v1/+/telemetry" -C 8 -W 60 -v > /tmp/sim; \
 		grep -q "schema_version" /tmp/sim'
 	docker compose down

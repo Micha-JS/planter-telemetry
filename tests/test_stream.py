@@ -144,16 +144,13 @@ def test_build_streams_deterministic_and_seed_sensitive() -> None:
 def test_more_devices_do_not_perturb_existing_ones() -> None:
     small = SimulatorSettings(device_count=2, seed=42)
     large = SimulatorSettings(device_count=4, seed=42)
-    small_dev0 = [
-        e
-        for e in itertools.islice(build_streams(small, START), 400)
-        if e.reading.device_id == "planter-00"
-    ]
-    large_dev0 = [
-        e
-        for e in itertools.islice(build_streams(large, START), 800)
-        if e.reading.device_id == "planter-00"
-    ]
-    prefix = min(len(small_dev0), len(large_dev0))
-    assert prefix > 0
-    assert small_dev0[:prefix] == large_dev0[:prefix]
+    small_emissions = list(itertools.islice(build_streams(small, START), 400))
+    large_emissions = list(itertools.islice(build_streams(large, START), 800))
+    # Check every device of the smaller fleet, not just planter-00: phase
+    # must not depend on device_count either.
+    for device_id in ("planter-00", "planter-01"):
+        small_dev = [e for e in small_emissions if e.reading.device_id == device_id]
+        large_dev = [e for e in large_emissions if e.reading.device_id == device_id]
+        prefix = min(len(small_dev), len(large_dev))
+        assert prefix > 0
+        assert small_dev[:prefix] == large_dev[:prefix]
