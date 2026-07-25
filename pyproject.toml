@@ -1,6 +1,6 @@
 [project]
 name = "planter-telemetry"
-version = "0.1.0"
+dynamic = ["version"]
 description = "End-to-end IoT telemetry pipeline for an ESP32 planter sensor pod: MQTT ingestion, TimescaleDB storage, provisioned Grafana dashboards, and refill forecasting."
 readme = "README.md"
 license = "MIT"
@@ -15,14 +15,18 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+# uv.lock does not cover PEP 517 build requirements, and the string-form
+# `license` above is PEP 639 (hatchling >= 1.26) — keep the backend bounded.
+requires = ["hatchling>=1.26,<2"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/planter_telemetry/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/planter_telemetry"]
 
 [tool.ruff]
-target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
@@ -38,8 +42,7 @@ select = [
 
 [tool.mypy]
 strict = true
-python_version = "3.12"
-files = ["src", "tests"]
+files = ["$MYPY_CONFIG_FILE_DIR/src", "$MYPY_CONFIG_FILE_DIR/tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

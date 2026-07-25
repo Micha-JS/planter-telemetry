@@ -2,6 +2,9 @@ services:
   mosquitto:
     image: eclipse-mosquitto:2
     ports:
-      - "1883:1883"
+      # Loopback only: the broker allows anonymous access (see mosquitto.conf),
+      # so it must not be reachable from the LAN. Containers on the compose
+      # network are unaffected by the host binding.
+      - "127.0.0.1:1883:1883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
