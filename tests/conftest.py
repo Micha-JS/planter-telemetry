@@ -76,4 +76,10 @@ def clean_db(db_dsn: str) -> str:
     """Per-test isolation on the shared session container."""
     with psycopg.connect(db_dsn, autocommit=True) as conn:
         conn.execute("TRUNCATE telemetry, dead_letter, devices RESTART IDENTITY")
+        # The continuous aggregates are truncated explicitly: whether raw-
+        # hypertable TRUNCATE writes cagg invalidations is undocumented, and
+        # cagg TRUNCATE also resets the real-time watermark (fixed in 2.15) —
+        # without that, stale materialized state could leak between tests.
+        conn.execute("TRUNCATE telemetry_hourly")
+        conn.execute("TRUNCATE telemetry_daily")
     return db_dsn

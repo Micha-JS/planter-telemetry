@@ -90,6 +90,20 @@ def test_migrated_from_empty_matches_expected_schema(db_dsn: str) -> None:
     constraints = _rows(db_dsn, _DESCRIBE_CONSTRAINTS)
     assert ("telemetry", "u", "UNIQUE (device_id, measured_at)") in constraints
 
+    # Both rollups exist as real-time aggregates (materialized_only = false
+    # is the non-default that makes them queryable mid-demo), each with a
+    # refresh policy job.
+    assert _rows(
+        db_dsn,
+        "SELECT view_name, materialized_only"
+        " FROM timescaledb_information.continuous_aggregates ORDER BY view_name",
+    ) == [("telemetry_daily", False), ("telemetry_hourly", False)]
+    assert _rows(
+        db_dsn,
+        "SELECT count(*) FROM timescaledb_information.jobs"
+        " WHERE proc_name = 'policy_refresh_continuous_aggregate'",
+    ) == [(2,)]
+
 
 def test_upgrade_twice_is_a_noop(db_dsn: str) -> None:
     dsn = _fresh_db(db_dsn, "idempotency")
