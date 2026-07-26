@@ -104,6 +104,24 @@ def test_migrated_from_empty_matches_expected_schema(db_dsn: str) -> None:
         " WHERE proc_name = 'policy_refresh_continuous_aggregate'",
     ) == [(2,)]
 
+    # Columnstore is enabled on telemetry (segmented by device) with a
+    # compression policy job — and there is deliberately NO retention job.
+    # (The info view still spells columnstore enablement `compression_enabled`.)
+    assert _rows(
+        db_dsn,
+        "SELECT compression_enabled FROM timescaledb_information.hypertables"
+        " WHERE hypertable_name = 'telemetry'",
+    ) == [(True,)]
+    assert _rows(
+        db_dsn,
+        "SELECT count(*) FROM timescaledb_information.jobs"
+        " WHERE proc_name = 'policy_compression' AND hypertable_name = 'telemetry'",
+    ) == [(1,)]
+    assert _rows(
+        db_dsn,
+        "SELECT count(*) FROM timescaledb_information.jobs WHERE proc_name = 'policy_retention'",
+    ) == [(0,)]
+
 
 def test_upgrade_twice_is_a_noop(db_dsn: str) -> None:
     dsn = _fresh_db(db_dsn, "idempotency")

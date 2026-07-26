@@ -50,3 +50,12 @@ jobs:
 
       - name: Full pipeline lands rows in the database
         run: make ingest-smoke
+
+      - name: Second up against the persisted volume (migrate is a no-op)
+        # ingest-smoke left the named volume behind, so this exercises the
+        # existing-database migration path, not just migrate-from-empty.
+        # `up -d` itself fails if migrate exits nonzero: ingestion depends on
+        # migrate with condition service_completed_successfully.
+        run: |
+          docker compose up -d
+          docker compose down -v
