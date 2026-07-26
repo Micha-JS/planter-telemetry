@@ -5,7 +5,12 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from planter_telemetry.contract import TELEMETRY_TOPIC_FILTER, TelemetryV1, telemetry_topic
+from planter_telemetry.contract import (
+    TELEMETRY_TOPIC_FILTER,
+    TelemetryV1,
+    device_id_from_topic,
+    telemetry_topic,
+)
 
 
 def _reading(**overrides: object) -> TelemetryV1:
@@ -91,3 +96,29 @@ def test_topic_matches_filter_shape() -> None:
     prefix, _, suffix = TELEMETRY_TOPIC_FILTER.partition("+")
     assert topic.startswith(prefix)
     assert topic.endswith(suffix)
+
+
+@pytest.mark.parametrize("device_id", ["planter-00", "a", "x" * 32])
+def test_device_id_from_topic_round_trips(device_id: str) -> None:
+    assert device_id_from_topic(telemetry_topic(device_id)) == device_id
+
+
+@pytest.mark.parametrize(
+    "topic",
+    [
+        "planter/v2/planter-00/telemetry",  # wrong version
+        "garden/v1/planter-00/telemetry",  # wrong root
+        "planter/v1/planter-00/status",  # wrong leaf
+        "planter/v1/planter-00",  # too few segments
+        "planter/v1/planter-00/telemetry/extra",  # too many segments
+        "planter/v1//telemetry",  # empty device segment
+        "",
+    ],
+)
+def test_device_id_from_topic_rejects_non_v1_telemetry(topic: str) -> None:
+    assert device_id_from_topic(topic) is None
+
+
+def test_device_id_from_topic_passes_garbage_segment_through() -> None:
+    # Not re-validated against DeviceId: the consumer's mismatch check owns that.
+    assert device_id_from_topic("planter/v1/UPPER!/telemetry") == "UPPER!"

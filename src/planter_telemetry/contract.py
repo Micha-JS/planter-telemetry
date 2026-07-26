@@ -29,6 +29,20 @@ def telemetry_topic(device_id: str) -> str:
     return f"planter/v1/{device_id}/telemetry"
 
 
+def device_id_from_topic(topic: str) -> str | None:
+    """Inverse of telemetry_topic(); None if the topic is not a v1 telemetry topic.
+
+    The segment is not re-validated against DeviceId here: the consumer compares
+    it against the payload's validated device_id, so a garbage segment surfaces
+    as a mismatch rather than being silently rejected earlier.
+    """
+    match topic.split("/"):
+        case ["planter", "v1", device_id, "telemetry"] if device_id:
+            return device_id
+        case _:
+            return None
+
+
 # Lowercase alphanumerics plus - and _, max 32 chars: excludes MQTT topic
 # metacharacters (/ + #) and a leading $, so interpolating a validated id into
 # telemetry_topic() is always topic-safe.

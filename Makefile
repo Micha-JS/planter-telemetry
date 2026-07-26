@@ -1,4 +1,4 @@
-.PHONY: lint typecheck test up down smoke sim-smoke
+.PHONY: lint typecheck test integration up down smoke sim-smoke ingest-smoke
 
 lint:
 	uv run ruff format --check .
@@ -9,6 +9,10 @@ typecheck:
 
 test:
 	uv run pytest
+
+# Real broker + real TimescaleDB via testcontainers; needs a docker daemon.
+integration:
+	uv run pytest -m integration
 
 up:
 	docker compose up -d
@@ -45,4 +49,19 @@ sim-smoke:
 		done; \
 		mosquitto_sub -t "planter/v1/+/telemetry" -C 8 -W 60 -v > /tmp/sim; \
 		grep -q "schema_version" /tmp/sim'
+	docker compose down
+
+# Full-pipeline check: simulator → broker → ingestion → TimescaleDB. Rows must
+# land in the telemetry table and the ingestion container must still be
+# running afterwards (it never crashes on the simulator's injected garbage).
+ingest-smoke:
+	docker compose up -d --build
+	for i in $$(seq 1 60); do \
+		count=$$(docker compose exec -T timescaledb \
+			psql -U planter -d planter -tAc "SELECT count(*) FROM telemetry" 2>/dev/null) \
+			&& [ "$$count" -gt 0 ] && break; \
+		sleep 1; \
+		if [ $$i -eq 60 ]; then echo "no telemetry rows after 60s" >&2; exit 1; fi; \
+	done
+	docker compose ps --status running --format '{{.Service}}' | grep -qx ingestion
 	docker compose down

@@ -6,7 +6,9 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
+    "aiomqtt>=2.5.1",
     "paho-mqtt>=2.1",
+    "psycopg[binary]>=3.3.4",
     "pydantic>=2.11",
     "pydantic-settings>=2.10",
 ]
@@ -15,7 +17,9 @@ dependencies = [
 dev = [
     "mypy>=1.16",
     "pytest>=8.4",
+    "pytest-asyncio>=1.4.0",
     "ruff>=0.12",
+    "testcontainers>=4.15.0",
 ]
 
 [build-system]
@@ -51,3 +55,11 @@ files = ["$MYPY_CONFIG_FILE_DIR/src", "$MYPY_CONFIG_FILE_DIR/tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: needs docker (real broker + TimescaleDB via testcontainers)",
+]
+# Unit tests are the default; run `make integration` (or pytest -m integration)
+# for the docker-backed suite.
+addopts = "-m 'not integration'"
