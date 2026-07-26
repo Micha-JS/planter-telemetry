@@ -8,18 +8,17 @@ readiness is checked the same way the services themselves would.
 
 import time
 from collections.abc import Iterator
-from pathlib import Path
 
 import psycopg
 import pytest
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.waiting_utils import wait_for_logs
 
+from planter_telemetry import migrate
+
 # Keep in sync with docker-compose.yml.
 TIMESCALE_IMAGE = "timescale/timescaledb:2.28.3-pg17"
 MOSQUITTO_IMAGE = "eclipse-mosquitto:2"
-
-_SCHEMA = Path(__file__).parent.parent / "db" / "init" / "schema.sql"
 
 
 @pytest.fixture(scope="session")
@@ -66,9 +65,9 @@ def db_dsn() -> Iterator[str]:
         port = int(container.get_exposed_port(5432))
         dsn = f"postgresql://planter:planter@{host}:{port}/planter"
         _wait_for_db(dsn)
-        with psycopg.connect(dsn, autocommit=True) as conn:
-            # The exact DDL compose mounts into /docker-entrypoint-initdb.d.
-            conn.execute(_SCHEMA.read_bytes())
+        # The same code path the compose `migrate` service runs: every
+        # integration test therefore runs against the migrated schema.
+        migrate.upgrade(dsn)
         yield dsn
 
 

@@ -7,10 +7,12 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "aiomqtt>=2.5.1",
+    "alembic>=1.16",
     "paho-mqtt>=2.1",
     "psycopg[binary]>=3.3.4",
     "pydantic>=2.11",
     "pydantic-settings>=2.10",
+    "sqlalchemy>=2.0",
 ]
 
 [dependency-groups]
@@ -33,6 +35,12 @@ path = "src/planter_telemetry/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/planter_telemetry"]
+
+[tool.alembic]
+# For the dev CLI (`uv run alembic ...`) only; the runtime and the test suite
+# build their Config programmatically (planter_telemetry.migrate.build_config)
+# so migrations work from the installed wheel regardless of cwd.
+script_location = "%(here)s/src/planter_telemetry/migrations"
 
 [tool.ruff]
 line-length = 100
