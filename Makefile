@@ -1,4 +1,4 @@
-.PHONY: lint typecheck test integration up down smoke sim-smoke ingest-smoke
+.PHONY: lint typecheck test integration up down down-clean migrate smoke sim-smoke ingest-smoke
 
 lint:
 	uv run ruff format --check .
@@ -19,6 +19,16 @@ up:
 
 down:
 	docker compose down
+
+# Also removes the pgdata volume: the next `up` starts from an empty,
+# freshly migrated database — the pre-M3 "pristine demo" behavior.
+down-clean:
+	docker compose down -v
+
+# Migrate the compose database from the host (the stack runs this itself via
+# the migrate service; this target is for ad-hoc use against port 5433).
+migrate:
+	uv run python -m planter_telemetry.migrate
 
 # End-to-end broker check: wait until the broker accepts connections, then do a
 # pub/sub round-trip through it. Uses the clients bundled in the image.
