@@ -17,6 +17,17 @@ INSERT INTO dead_letter (topic, payload, reason)
 VALUES (%s, %s, %s)
 """
 
+# LEAST/GREATEST make the registry correct under out-of-order arrival and
+# redelivery without a read-modify-write: whichever order readings land in,
+# first_seen/last_seen converge on the min/max measured_at.
+_UPSERT_DEVICE = """\
+INSERT INTO devices (device_id, first_seen, last_seen)
+VALUES (%s, %s, %s)
+ON CONFLICT (device_id) DO UPDATE SET
+    first_seen = LEAST(devices.first_seen, EXCLUDED.first_seen),
+    last_seen  = GREATEST(devices.last_seen, EXCLUDED.last_seen)
+"""
+
 
 class Writer:
     """Row-at-a-time writer over a single autocommit connection.
@@ -49,6 +60,13 @@ class Writer:
             ),
         )
         return cursor.rowcount == 1
+
+    async def upsert_device(self, reading: TelemetryV1) -> None:
+        """Track the reading's device in the registry (first_seen/last_seen)."""
+        await self._conn.execute(
+            _UPSERT_DEVICE,
+            (reading.device_id, reading.measured_at, reading.measured_at),
+        )
 
     async def insert_dead_letter(self, dead_letter: DeadLetter) -> None:
         await self._conn.execute(

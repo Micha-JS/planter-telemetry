@@ -94,6 +94,10 @@ async def _handle_one(item: tuple[str, bytes], writer: Writer, counters: Counter
     topic, payload = item
     outcome = classify(topic, payload)
     if isinstance(outcome, ValidReading):
+        # Registry first, so a reading never exists without its device row;
+        # deliberately also on redeliveries (the upsert is idempotent and
+        # last_seen must advance even when the reading itself deduplicates).
+        await writer.upsert_device(outcome.reading)
         if await writer.insert_reading(outcome.reading):
             counters.ingested += 1
         else:

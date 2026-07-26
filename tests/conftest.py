@@ -75,5 +75,5 @@ def db_dsn() -> Iterator[str]:
 def clean_db(db_dsn: str) -> str:
     """Per-test isolation on the shared session container."""
     with psycopg.connect(db_dsn, autocommit=True) as conn:
-        conn.execute("TRUNCATE telemetry, dead_letter RESTART IDENTITY")
+        conn.execute("TRUNCATE telemetry, dead_letter, devices RESTART IDENTITY")
     return db_dsn
