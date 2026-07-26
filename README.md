@@ -118,7 +118,7 @@ Configuration via environment variables (set them on the `ingestion` service in
 | `INGEST_MQTT_HOST` | `localhost` | broker host (`mosquitto` inside compose) |
 | `INGEST_MQTT_PORT` | `1883` | broker port |
 | `INGEST_CLIENT_ID` | `planter-ingestion` | stable MQTT client id; the broker keeps the QoS 1 session across restarts |
-| `INGEST_DB_DSN` | `postgresql://planter:planter@localhost:5432/planter` | TimescaleDB connection string |
+| `INGEST_DB_DSN` | `postgresql://planter:planter@localhost:5433/planter` | TimescaleDB connection string (default matches the compose stack's host port) |
 | `INGEST_RECONNECT_INITIAL_SECONDS` | `1` | first reconnect delay after broker/DB loss |
 | `INGEST_RECONNECT_MAX_SECONDS` | `30` | reconnect backoff cap |
 | `INGEST_STATS_INTERVAL_SECONDS` | `30` | cadence of the `ingested/deduplicated/dead_lettered` stats log line |

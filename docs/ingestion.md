@@ -43,11 +43,16 @@ processes. Two boundaries are deliberate and worth stating plainly:
 - **The ack window.** paho (and therefore aiomqtt) sends the QoS 1 PUBACK when
   the message is received, before it is processed — there is no manual-ack API.
   A crash between ack and database commit can lose the in-flight message(s).
-  Mitigations: SIGTERM drains cleanly (in-flight messages finish before the
-  consumer exits), and a message whose DB write fails is held in memory and
-  retried across the reconnect rather than dropped. The residual window — a
-  hard kill mid-write — is real but only ever costs messages already acked and
-  not yet committed. We do not claim exactly-once end-to-end.
+  Mitigations, in order of the failure they cover: on SIGTERM the service
+  finishes the in-flight message *and* writes out everything already buffered
+  (acked) in the client's incoming queue before exiting; on database loss that
+  same buffered backlog is salvaged into memory, held across the reconnect,
+  and replayed first; if stop arrives while the database is still down, a
+  final bounded flush attempt runs at exit and any loss is logged loudly
+  (`dropping N acked message(s)`), never silently. The residual window — a
+  hard kill (SIGKILL) between ack and commit — is real but only ever costs
+  messages already acked and not yet committed. We do not claim exactly-once
+  end-to-end.
 - **Broker restarts.** Mosquitto runs with `persistence false`, so the
   persistent session (and anything queued in it) survives ingestion restarts
   but not broker restarts. Consistent with the architecture's stance: the
@@ -97,7 +102,13 @@ The claims above are CI-verified against a real broker and a real TimescaleDB
 - malformed messages land in `dead_letter` with meaningful reasons while valid
   messages around them ingest and the service keeps running;
 - out-of-order arrivals ingest fine — the write path assumes nothing about
-  ordering.
+  ordering;
+- stopping mid-burst loses nothing: a broker-side backlog delivered (and
+  acked) faster than it is written still lands completely, because shutdown
+  drains the client's buffered queue;
+- a database outage mid-stream loses nothing: acked messages are salvaged
+  into memory, replayed after the reconnect, and every unique reading ends up
+  in the table.
 
 `make ingest-smoke` additionally proves the composed artifact: simulator →
 broker → ingestion → rows in the database, ingestion container still healthy.

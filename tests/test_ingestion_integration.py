@@ -22,6 +22,7 @@ import pytest
 
 from planter_telemetry.contract import TELEMETRY_TOPIC_FILTER, TelemetryV1, telemetry_topic
 from planter_telemetry.ingestion.config import IngestSettings
+from planter_telemetry.ingestion.db import Writer
 from planter_telemetry.ingestion.service import Counters, run
 from planter_telemetry.simulator.config import SimulatorSettings
 from planter_telemetry.simulator.stream import Emission, build_streams
@@ -90,9 +91,15 @@ async def _publish(host: str, port: int, messages: Iterable[tuple[str, bytes]]) 
 
 @asynccontextmanager
 async def _running_service(
-    host: str, port: int, dsn: str, client_id: str
+    host: str, port: int, dsn: str, client_id: str, reconnect_initial_seconds: float = 1.0
 ) -> AsyncIterator[tuple[Counters, asyncio.Task[None]]]:
-    settings = IngestSettings(mqtt_host=host, mqtt_port=port, client_id=client_id, db_dsn=dsn)
+    settings = IngestSettings(
+        mqtt_host=host,
+        mqtt_port=port,
+        client_id=client_id,
+        db_dsn=dsn,
+        reconnect_initial_seconds=reconnect_initial_seconds,
+    )
     counters = Counters()
     stop = asyncio.Event()
     task = asyncio.create_task(run(settings, counters=counters, stop=stop))
@@ -224,6 +231,71 @@ async def test_malformed_messages_dead_letter_without_crashing(
     assert "device_id" in reasons[2]  # MISSING_FIELD
     assert "device_id mismatch" in reasons[3]
     assert "planter-00" in reasons[3] and "planter-01" in reasons[3]
+
+
+async def test_shutdown_drains_acked_backlog(mqtt_endpoint: tuple[str, int], clean_db: str) -> None:
+    """Stopping mid-burst loses nothing.
+
+    All 60 messages are queued broker-side before the service starts, so
+    connecting delivers them in one burst — paho acks the burst into
+    aiomqtt's incoming queue far faster than row-at-a-time writes drain it.
+    Stopping right after the first row forces the shutdown drain to write
+    the acked backlog; whatever the broker had not yet delivered stays in
+    the persistent session and arrives after the restart. Without the
+    drain, the acked-but-unprocessed messages are gone forever and the
+    final count sticks below 60.
+    """
+    host, port = mqtt_endpoint
+    emissions = _emissions(_sim_settings(), 60)
+
+    await _prime_session(host, port, "it-drain")
+    await _publish(host, port, _wire(emissions))
+
+    async with _running_service(host, port, clean_db, "it-drain") as (counters, _task):
+        await _wait_until(lambda: counters.ingested >= 1, "first row written")
+    # The context manager has set stop and awaited the task: the service is
+    # fully down, and everything it acked must already be in the database.
+
+    async with _running_service(host, port, clean_db, "it-drain") as (_counters, _task):
+        await _wait_for_scalar(clean_db, "SELECT count(*) FROM telemetry", 60)
+
+    assert await _scalar(clean_db, "SELECT count(*) FROM dead_letter") == 0
+
+
+async def test_db_outage_loses_nothing(
+    mqtt_endpoint: tuple[str, int], clean_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acked messages survive a database outage via salvage + replay.
+
+    A window of injected OperationalErrors spans several reconnect cycles;
+    each failure happens with acked messages sitting in aiomqtt's queue,
+    which the service must salvage into memory and replay after the
+    reconnect. Every unique reading must land despite the outage.
+    """
+    host, port = mqtt_endpoint
+    emissions = _emissions(_sim_settings(), 40)
+
+    real_insert = Writer.insert_reading
+    calls = itertools.count()
+    fail_start, fail_stop = 10, 13  # three failures -> at least three reconnects
+
+    async def flaky_insert(self: Writer, reading: TelemetryV1) -> bool:
+        if fail_start <= next(calls) < fail_stop:
+            raise psycopg.OperationalError("injected outage")
+        return await real_insert(self, reading)
+
+    monkeypatch.setattr(Writer, "insert_reading", flaky_insert)
+
+    await _prime_session(host, port, "it-outage")
+    async with _running_service(
+        host, port, clean_db, "it-outage", reconnect_initial_seconds=0.1
+    ) as (counters, task):
+        await _publish(host, port, _wire(emissions))
+        await _wait_for_scalar(clean_db, "SELECT count(*) FROM telemetry", 40)
+        assert not task.done()  # survived the outage
+
+    assert counters.ingested == 40
+    assert counters.dead_lettered == 0
 
 
 async def test_out_of_order_arrival_ingests_fine(

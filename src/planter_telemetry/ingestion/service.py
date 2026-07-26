@@ -4,11 +4,17 @@ Delivery semantics (documented in docs/ingestion.md): QoS 1 plus a persistent
 session gives at-least-once delivery from the broker; the idempotent insert
 makes redelivery harmless. The service never crashes on message content —
 anything unparseable becomes a dead-letter row.
+
+paho acks a QoS 1 message the moment it is buffered, before this service
+processes it, so acked-but-unwritten messages are treated as radioactive:
+drained to the database on shutdown, salvaged into memory across DB loss,
+and flushed (or loudly reported) before exit. See run() and docs/ingestion.md.
 """
 
 import asyncio
 import logging
 import signal
+from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +28,10 @@ from planter_telemetry.ingestion.core import ValidReading, classify
 from planter_telemetry.ingestion.db import Writer
 
 logger = logging.getLogger("planter_telemetry.ingestion")
+
+# Shutdown-time budget for writing out acked-but-unwritten messages after the
+# database was lost; compose's default SIGTERM grace period is 10 s.
+_FINAL_FLUSH_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass
@@ -61,6 +71,23 @@ async def _next_message(
         halt.cancel()
         with suppress(asyncio.CancelledError):
             await halt
+
+
+async def _salvage_queue(
+    messages: aiomqtt.client.MessagesIterator, pending: deque[tuple[str, bytes]]
+) -> None:
+    """Move every message aiomqtt has already buffered into `pending`.
+
+    paho sends the QoS 1 PUBACK when it enqueues a message — before the app
+    sees it — so anything in this queue is acked and the broker will never
+    redeliver it. Leaving it behind on teardown would be silent loss.
+    __anext__ returns queued messages in preference to noticing a
+    disconnect, so this drains even when the broker connection is gone.
+    """
+    with suppress(aiomqtt.MqttError):
+        while len(messages) > 0:
+            message = await anext(messages)
+            pending.append((message.topic.value, message.payload))
 
 
 async def _handle_one(item: tuple[str, bytes], writer: Writer, counters: Counters) -> None:
@@ -119,10 +146,12 @@ async def run(
 
     stats_task = asyncio.create_task(_log_stats(counters, settings.stats_interval_seconds))
     backoff = settings.reconnect_initial_seconds
-    # A message the broker already PUBACKed but whose DB write failed: held
-    # across the reconnect and replayed first — dropping it would be silent
-    # loss, and idempotency makes a double-write harmless.
-    pending: tuple[str, bytes] | None = None
+    # Messages the broker already PUBACKed but that are not yet in the
+    # database: the current message plus, on DB loss, everything salvaged
+    # from aiomqtt's internal queue. Held across reconnects and replayed
+    # first — dropping any of them would be silent loss, and idempotency
+    # makes a double-write harmless.
+    pending: deque[tuple[str, bytes]] = deque()
     try:
         while not stop.is_set():
             writer: Writer | None = None
@@ -147,20 +176,36 @@ async def run(
                     )
                     backoff = settings.reconnect_initial_seconds
                     messages = client.messages
-                    if pending is not None:
-                        await _handle_one(pending, writer, counters)
-                        pending = None
-                    while not stop.is_set():
-                        message = await _next_message(messages, stop)
-                        if message is None:
-                            break
-                        item = (message.topic.value, message.payload)
-                        pending = item
-                        await _handle_one(item, writer, counters)
-                        pending = None
+                    try:
+                        while pending and not stop.is_set():
+                            await _handle_one(pending[0], writer, counters)
+                            pending.popleft()
+                        while not stop.is_set():
+                            message = await _next_message(messages, stop)
+                            if message is None:
+                                break
+                            item = (message.topic.value, message.payload)
+                            pending.append(item)
+                            await _handle_one(item, writer, counters)
+                            pending.popleft()
+                        # Stop requested: everything left in aiomqtt's queue
+                        # is already acked — write it out before the client
+                        # context (and the queue with it) is torn down.
+                        while len(messages) > 0:
+                            message = await anext(messages)
+                            item = (message.topic.value, message.payload)
+                            pending.append(item)
+                            await _handle_one(item, writer, counters)
+                            pending.popleft()
+                    except psycopg.OperationalError:
+                        # DB gone, but this client — and its queue of acked
+                        # messages — is still alive: salvage into `pending`
+                        # before the context manager discards the queue.
+                        await _salvage_queue(messages, pending)
+                        raise
             except (aiomqtt.MqttError, psycopg.OperationalError) as exc:
                 if stop.is_set():
-                    break
+                    break  # shutting down; the final flush below owns `pending`
                 logger.warning(
                     "connection lost (%s: %s); reconnecting in %.1fs",
                     type(exc).__name__,
@@ -173,6 +218,24 @@ async def run(
                 if writer is not None:
                     with suppress(Exception):
                         await writer.close()
+        if pending:
+            # Last chance for acked-but-unwritten messages (the DB was down
+            # when stop arrived): one bounded flush attempt, then loud loss —
+            # the broker considers these delivered and will not redeliver.
+            try:
+                async with asyncio.timeout(_FINAL_FLUSH_TIMEOUT_SECONDS):
+                    flush_writer = await Writer.connect(settings.db_dsn)
+                    try:
+                        while pending:
+                            await _handle_one(pending[0], flush_writer, counters)
+                            pending.popleft()
+                    finally:
+                        await flush_writer.close()
+            except Exception:
+                logger.error(
+                    "dropping %d acked message(s) unwritten: database unreachable at shutdown",
+                    len(pending),
+                )
     finally:
         stats_task.cancel()
         with suppress(asyncio.CancelledError):
