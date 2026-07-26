@@ -34,6 +34,9 @@ jobs:
       - name: Test
         run: make test
 
+      - name: Integration tests (real broker + TimescaleDB)
+        run: make integration
+
   compose-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -44,3 +47,6 @@ jobs:
 
       - name: Simulator stream reaches the broker
         run: make sim-smoke
+
+      - name: Full pipeline lands rows in the database
+        run: make ingest-smoke

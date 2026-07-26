@@ -11,23 +11,23 @@ itself — dedupes, dead-letters, out-of-order arrivals, missed check-ins), and
 **replay/time-travel** (re-run any historical window at speed, safe because ingestion
 is idempotent).
 
-**Status: M1 — message contract + simulator.** See
+**Status: M2 — ingestion service.** See
 [planter-telemetry-plan.md](planter-telemetry-plan.md) for the full milestone plan.
 
-## Planned architecture
+## Architecture
 
 ```
 ESP32 sensor pod (optional real hardware)  ─┐
                                             ├─► MQTT broker ─► Ingestion service ─► TimescaleDB ─► Grafana
-Device simulator (default demo mode)       ─┘   (Mosquitto)    (typed Python)       (Postgres)     (provisioned)
+Device simulator (default demo mode)       ─┘   (Mosquitto)    (typed Python)       (Postgres)     (planned, M4)
 ```
 
-Everything will run via `docker compose up`, with a device simulator as the default
+Everything runs via `docker compose up`, with a device simulator as the default
 data source — real hardware is an optional backend, never a requirement.
 
 ## Quickstart (what works today)
 
-Start the MQTT broker and the device simulator:
+Start the broker, the device simulator, the ingestion service, and TimescaleDB:
 
 ```bash
 docker compose up -d --build
@@ -42,8 +42,8 @@ docker compose exec mosquitto mosquitto_sub -t 'planter/v1/+/telemetry' -v
 
 Within a minute you'll see four planters publishing JSON readings with visibly
 falling water levels — plus, by design, occasional duplicates, stale out-of-order
-readings, and corrupted payloads (the failure modes the ingestion pipeline must
-survive, arriving in M2):
+readings, and corrupted payloads (the failure modes the ingestion pipeline visibly
+survives):
 
 ```
 planter/v1/planter-02/telemetry {"schema_version":1,"device_id":"planter-02","measured_at":"2026-07-25T11:01:18.750666Z","water_level":89.4,"battery_voltage":3.899}
@@ -52,9 +52,19 @@ planter/v1/planter-00/telemetry {"schema_version":1,"device_id":"planter-00","me
 planter/v1/planter-00/telemetry {"schema_version":1,"device_id":"planter-0
 ```
 
+Watch validated rows land in the database (duplicates are absorbed by the
+idempotent insert; corrupted payloads divert to `dead_letter` instead):
+
+```bash
+docker compose exec timescaledb psql -U planter -d planter \
+  -c "SELECT count(*) FROM telemetry" \
+  -c "SELECT topic, reason, received_at FROM dead_letter ORDER BY id DESC LIMIT 3"
+```
+
 If you have mosquitto clients installed on your host,
 `mosquitto_sub -h localhost -t 'planter/v1/+/telemetry' -v` works the same way
-against port 1883. Tear down with `docker compose down`.
+against port 1883, and `psql` reaches the database on `localhost:5433`
+(user/password/db all `planter`). Tear down with `docker compose down`.
 
 The wire format, topic tree, versioning policy, and idempotency key are documented
 in [docs/message-contract.md](docs/message-contract.md).
@@ -89,6 +99,30 @@ Configuration via environment variables (set them on the `simulator` service in
 | `SIM_MALFORMED_RATE` | `0.02` | chance per wake-up of a corrupted payload (rotating: truncated JSON, wrong types, missing fields) |
 | `SIM_MISSED_CHECKIN_RATE` | `0.03` | chance per wake-up of the device skipping a check-in entirely |
 
+## Ingestion
+
+The ingestion service subscribes to the telemetry topic tree (QoS 1, persistent
+session), validates every message against the shared Pydantic contract, and writes
+idempotently to TimescaleDB: `INSERT … ON CONFLICT (device_id, measured_at) DO
+NOTHING`, so replaying any stream twice changes nothing. Messages that fail
+validation — truncated JSON, out-of-range values, naive timestamps, a topic whose
+device id contradicts the payload — land in a `dead_letter` table with the raw
+payload and a reason, never crash the service, and never disappear silently.
+Design and delivery-semantics notes: [docs/ingestion.md](docs/ingestion.md).
+
+Configuration via environment variables (set them on the `ingestion` service in
+`docker-compose.yml`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INGEST_MQTT_HOST` | `localhost` | broker host (`mosquitto` inside compose) |
+| `INGEST_MQTT_PORT` | `1883` | broker port |
+| `INGEST_CLIENT_ID` | `planter-ingestion` | stable MQTT client id; the broker keeps the QoS 1 session across restarts |
+| `INGEST_DB_DSN` | `postgresql://planter:planter@localhost:5432/planter` | TimescaleDB connection string |
+| `INGEST_RECONNECT_INITIAL_SECONDS` | `1` | first reconnect delay after broker/DB loss |
+| `INGEST_RECONNECT_MAX_SECONDS` | `30` | reconnect backoff cap |
+| `INGEST_STATS_INTERVAL_SECONDS` | `30` | cadence of the `ingested/deduplicated/dead_lettered` stats log line |
+
 ## Development
 
 Dependencies are managed with [uv](https://docs.astral.sh/uv/):
@@ -100,9 +134,10 @@ uv sync
 Then the usual targets:
 
 ```bash
-make lint       # ruff format --check + ruff check
-make typecheck  # mypy --strict
-make test       # pytest
+make lint         # ruff format --check + ruff check
+make typecheck    # mypy --strict
+make test         # pytest (unit tests)
+make integration  # pytest -m integration: real broker + TimescaleDB via testcontainers
 ```
 
 ## License

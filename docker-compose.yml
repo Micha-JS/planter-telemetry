@@ -8,12 +8,58 @@ services:
       - "127.0.0.1:1883:1883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "127.0.0.1", "-t", "healthcheck", "-m", "ok"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  timescaledb:
+    image: timescale/timescaledb:2.28.3-pg17
+    environment:
+      # Dev-only credentials; the port is bound to loopback like the broker.
+      POSTGRES_USER: planter
+      POSTGRES_PASSWORD: planter
+      POSTGRES_DB: planter
+    ports:
+      # 5433 on the host: only for local psql inspection, and 5432 is a
+      # popular port for an already-running Postgres to be squatting on.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      # Applied by the image on first boot. Deliberately no data volume in M2:
+      # every `up` starts from an empty database and re-runs the init script,
+      # keeping the demo deterministic. M3 formalizes migrations.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h 127.0.0.1 forces TCP: during initdb a temporary server listens on
+      # the unix socket only, and a socket-based check would pass too early.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "planter", "-d", "planter"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+
+  ingestion:
+    build: .
+    init: true
+    # Same image as the simulator (see Dockerfile header), different command.
+    command: ["uv", "run", "--no-sync", "python", "-m", "planter_telemetry.ingestion"]
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    environment:
+      INGEST_MQTT_HOST: mosquitto
+      INGEST_DB_DSN: postgresql://planter:planter@timescaledb:5432/planter
+      # All INGEST_* knobs are documented in the README's Ingestion section.
 
   simulator:
     build: .
     init: true
     depends_on:
-      - mosquitto
+      mosquitto:
+        condition: service_healthy
     environment:
       SIM_MQTT_HOST: mosquitto
       # All SIM_* knobs (device count, seed, acceleration, imperfection
