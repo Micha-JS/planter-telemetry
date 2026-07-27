@@ -102,6 +102,7 @@ async def _handle_one(item: tuple[str, bytes], writer: Writer, counters: Counter
         if await writer.insert_reading(outcome.reading):
             counters.ingested += 1
         else:
+            await writer.record_dedupe(outcome.reading)
             counters.deduplicated += 1
             logger.debug(
                 "deduplicated %s @ %s",

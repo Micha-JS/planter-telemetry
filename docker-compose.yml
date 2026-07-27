@@ -81,5 +81,54 @@ services:
       # All SIM_* knobs (device count, seed, acceleration, imperfection
       # rates) are documented in the README's Simulator section.
 
+  grafana:
+    image: grafana/grafana:12.3.0
+    ports:
+      # Loopback only, like the broker and the database: anonymous viewer
+      # access is enabled below, so the dashboard must not be LAN-visible.
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Local demo: no login wall for viewing; admin (for editing while
+      # prototyping) stays password-protected. Dev-only default.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-planter}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      # Must match the default org name byte-for-byte, trailing dot included.
+      GF_AUTH_ANONYMOUS_ORG_NAME: "Main Org."
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/planter-fleet.json
+      # Interpolated by Grafana itself into the provisioned datasource yaml —
+      # the read-only role that migration 0007 creates.
+      GRAFANA_DB_USER: grafana_reader
+      GRAFANA_DB_PASSWORD: grafana_reader
+    volumes:
+      # Everything Grafana is provisioned from these read-only mounts; its
+      # internal sqlite is deliberately ephemeral (no volume), so down/up
+      # reproduces the identical instance from the repo alone.
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      migrate:
+        # The datasource connects as grafana_reader, which migration 0007
+        # creates — before migrate finishes there is nothing to log in as.
+        condition: service_completed_successfully
+    healthcheck:
+      # /api/health only proves Grafana's own sqlite. This endpoint makes
+      # Grafana run the postgres datasource health check — SELECT 1 through
+      # the provisioned datasource — so healthy means "can reach TimescaleDB
+      # as grafana_reader". The image ships busybox wget (no curl), which
+      # exits nonzero on any non-2xx response.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null",
+             "http://127.0.0.1:3000/api/datasources/uid/planter-timescaledb/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
 volumes:
   pgdata:

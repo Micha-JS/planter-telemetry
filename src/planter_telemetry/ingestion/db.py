@@ -17,6 +17,15 @@ INSERT INTO dead_letter (topic, payload, reason)
 VALUES (%s, %s, %s)
 """
 
+# ON CONFLICT DO NOTHING absorbs duplicates silently, which is right for
+# pipeline state but invisible to the dashboard — the event log is where a
+# dedupe leaves its queryable trace (occurred_at defaults to now(), the
+# wall-clock arrival time, like dead_letter.received_at).
+_INSERT_INGEST_EVENT = """\
+INSERT INTO ingest_events (event, device_id, measured_at)
+VALUES (%s, %s, %s)
+"""
+
 # LEAST/GREATEST make the registry correct under out-of-order arrival and
 # redelivery without a read-modify-write: whichever order readings land in,
 # first_seen/last_seen converge on the min/max measured_at.
@@ -66,6 +75,13 @@ class Writer:
         await self._conn.execute(
             _UPSERT_DEVICE,
             (reading.device_id, reading.measured_at, reading.measured_at),
+        )
+
+    async def record_dedupe(self, reading: TelemetryV1) -> None:
+        """Log a deduplicated redelivery to the ingest event table."""
+        await self._conn.execute(
+            _INSERT_INGEST_EVENT,
+            ("deduplicated", reading.device_id, reading.measured_at),
         )
 
     async def insert_dead_letter(self, dead_letter: DeadLetter) -> None:

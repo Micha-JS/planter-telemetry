@@ -22,9 +22,10 @@ in CI.
              │          (real-time, per-device avg/min/max
              │           water, avg/min battery, count)
              │
-             ├──────────► devices      (device_id PK, first_seen,
-             │                          last_seen, metadata jsonb)
-             └──────────► dead_letter  (raw payload + reason)
+             ├──────────► devices       (device_id PK, first_seen,
+             │                           last_seen, metadata jsonb)
+             ├──────────► dead_letter   (raw payload + reason)
+             └──────────► ingest_events (dedupe trace, M4)
 ```
 
 `telemetry` and `dead_letter` are unchanged from M2; the registry and the
@@ -201,7 +202,9 @@ ORDER BY day, device_id;
 
 Check-in health from the hourly rollup — hours where a device delivered
 fewer readings than its deep-sleep cadence predicts (12/hour at the
-5-virtual-minute default); the seed of M4's missed-check-in panel. The
+5-virtual-minute default); the seed of the dashboard's missed-check-in
+panel (the productionized variant, along with every other panel query,
+lives in [docs/dashboard-queries.md](dashboard-queries.md)). The
 newest bucket is excluded: it is still filling, so it always undercounts —
 and the cutoff comes from the device timeline (`max(measured_at)`), not the
 wall clock, because demo data is future-stamped:
