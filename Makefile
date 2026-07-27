@@ -1,4 +1,4 @@
-.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke replay-smoke hardware-up hardware-down hardware-passwd
+.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke replay-smoke hardware-up hardware-down hardware-passwd hardware-config-check
 
 # What ingesting samples/telemetry-window.jsonl must produce, pinned in
 # src/planter_telemetry/cli/sample.py and verified by tests/test_sample.py:
@@ -233,8 +233,64 @@ hardware-passwd:
 	@echo "$(DEVICE)" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,31}$$' || { \
 		echo "DEVICE must match ^[a-z0-9][a-z0-9_-]{0,31}$$ (username == device_id)" >&2; \
 		exit 1; }
-	docker run --rm -it -v ./mosquitto/auth:/mosquitto/auth eclipse-mosquitto:2 \
+	docker run --rm -it -v "$(CURDIR)/mosquitto/auth":/mosquitto/auth eclipse-mosquitto:2 \
 		sh -ec 'touch /mosquitto/auth/passwd && mosquitto_passwd /mosquitto/auth/passwd $(DEVICE)'
 	@$(HW_COMPOSE) kill -s SIGHUP mosquitto 2>/dev/null \
 		&& echo "broker reloaded (SIGHUP)" \
 		|| echo "broker not running — credentials take effect on next hardware-up"
+
+# Validates hardware mode without running it through the demo compose project:
+#   1. both compose file combinations parse, and the merge does what the
+#      override relies on (hardware conf replaces the demo conf, 1884 is
+#      published, the loopback-only 1883 binding survives);
+#   2. the hardware mosquitto config actually boots a broker — mosquitto has
+#      no config-lint flag, so a bare `docker run` (no compose project, no
+#      name/network collisions) with a THROWAWAY passwd file proves it, plus:
+#      anonymous is refused on 1884, an authenticated QoS-1 publish on 1884
+#      reaches a subscriber on 1883 (cross-listener routing + passwd parsing
+#      + ACL grant), and a publish to another device's topic never arrives
+#      (MQTT 3.1.1 drops ACL-denied publishes silently, so absence is the
+#      only observable; mosquitto_sub -W exits nonzero on timeout, hence
+#      the `|| true`). Never touches mosquitto/auth/passwd.
+hardware-config-check:
+	docker compose config -q
+	$(HW_COMPOSE) config -q
+	$(HW_COMPOSE) config | grep -q 'mosquitto.hardware.conf'
+	$(HW_COMPOSE) config | grep -q 'published: "1884"'
+	$(HW_COMPOSE) config | grep -q 'host_ip: 127.0.0.1'
+	set -e; \
+	tmp=$$(mktemp -d /tmp/planter-hwcheck.XXXXXX); \
+	cid=""; \
+	trap 'docker rm -f $$cid >/dev/null 2>&1 || true; rm -rf "$$tmp"' EXIT; \
+	docker run --rm -v "$$tmp":/auth eclipse-mosquitto:2 \
+		sh -ec 'mosquitto_passwd -c -b /auth/passwd ci-device ci-password && chmod 644 /auth/passwd'; \
+	cid=$$(docker run -d \
+		-v "$(CURDIR)/mosquitto/mosquitto.hardware.conf":/mosquitto/config/mosquitto.conf:ro \
+		-v "$(CURDIR)/mosquitto/auth/acl.conf":/mosquitto/auth/acl.conf:ro \
+		-v "$$tmp/passwd":/mosquitto/auth/passwd:ro \
+		eclipse-mosquitto:2); \
+	for i in $$(seq 1 30); do \
+		docker exec $$cid mosquitto_pub -p 1883 -t planter/ready -m ping 2>/dev/null && break; \
+		sleep 1; \
+		if [ $$i -eq 30 ]; then \
+			echo "hardware broker never came up" >&2; \
+			docker logs $$cid >&2; exit 1; \
+		fi; \
+	done; \
+	if docker exec $$cid mosquitto_pub -p 1884 -t planter/ready -m ping 2>/dev/null; then \
+		echo "anonymous publish ACCEPTED on 1884 — auth is broken" >&2; exit 1; \
+	fi; \
+	docker exec $$cid sh -ec ' \
+		mosquitto_sub -p 1883 -t planter/v1/ci-device/telemetry -C 1 -W 10 > /tmp/got & \
+		sleep 1; \
+		mosquitto_pub -p 1884 -u ci-device -P ci-password -q 1 \
+			-t planter/v1/ci-device/telemetry -m hw-ok; \
+		wait $$!; \
+		grep -qx hw-ok /tmp/got'; \
+	docker exec $$cid sh -ec ' \
+		mosquitto_sub -p 1883 -t planter/v1/other-device/telemetry -C 1 -W 5 > /tmp/leak & \
+		sleep 1; \
+		mosquitto_pub -p 1884 -u ci-device -P ci-password -q 1 \
+			-t planter/v1/other-device/telemetry -m leaked || true; \
+		wait $$! || true; \
+		test ! -s /tmp/leak'
