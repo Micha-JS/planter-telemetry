@@ -22,3 +22,8 @@ class IngestSettings(BaseSettings):
     reconnect_initial_seconds: float = Field(default=1.0, gt=0)
     reconnect_max_seconds: float = Field(default=30.0, gt=0)
     stats_interval_seconds: float = Field(default=30.0, gt=0)
+    # /healthz + /metrics. Loopback by default: the compose healthcheck runs
+    # inside the container, so nothing needs to be published to the host.
+    # Port 0 binds an ephemeral port (used by tests to avoid collisions).
+    ops_host: str = "127.0.0.1"
+    ops_port: int = Field(default=8080, ge=0, le=65535)

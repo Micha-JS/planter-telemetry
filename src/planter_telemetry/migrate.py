@@ -18,6 +18,7 @@ from psycopg.rows import TupleRow
 from sqlalchemy.engine import URL
 
 from planter_telemetry.ingestion.config import IngestSettings
+from planter_telemetry.jsonlog import configure
 
 logger = logging.getLogger(__name__)
 
@@ -77,13 +78,11 @@ def upgrade(dsn: str) -> None:
     config = build_config(dsn)
     with psycopg.connect(dsn) as conn:
         if _is_pre_alembic_m2(conn):
-            logger.info(
-                "pre-alembic M2 schema detected; stamping baseline revision %s",
-                BASELINE_REVISION,
-            )
+            # Event-name-plus-extra convention: see jsonlog module docstring.
+            logger.info("stamping_baseline", extra={"revision": BASELINE_REVISION})
             command.stamp(config, BASELINE_REVISION)
     command.upgrade(config, "head")
-    logger.info("database schema is at head")
+    logger.info("schema_at_head")
 
 
 def wait_for_db(dsn: str, timeout: float = 60.0) -> None:
@@ -101,7 +100,7 @@ def wait_for_db(dsn: str, timeout: float = 60.0) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure(service="migrate")
     dsn = IngestSettings().db_dsn
     wait_for_db(dsn)
     upgrade(dsn)

@@ -6,14 +6,19 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
+    "aiohttp>=3.13",
     "aiomqtt>=2.5.1",
     "alembic>=1.16",
     "paho-mqtt>=2.1",
+    "prometheus-client>=0.23",
     "psycopg[binary]>=3.3.4",
     "pydantic>=2.11",
     "pydantic-settings>=2.10",
     "sqlalchemy>=2.0",
 ]
+
+[project.scripts]
+planter-telemetry = "planter_telemetry.cli.app:main"
 
 [dependency-groups]
 dev = [

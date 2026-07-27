@@ -23,6 +23,7 @@ import pytest
 from planter_telemetry.contract import TELEMETRY_TOPIC_FILTER, TelemetryV1, telemetry_topic
 from planter_telemetry.ingestion.config import IngestSettings
 from planter_telemetry.ingestion.db import Writer
+from planter_telemetry.ingestion.ops import HealthState
 from planter_telemetry.ingestion.service import Counters, run
 from planter_telemetry.simulator.config import SimulatorSettings
 from planter_telemetry.simulator.stream import Emission, build_streams
@@ -91,7 +92,12 @@ async def _publish(host: str, port: int, messages: Iterable[tuple[str, bytes]]) 
 
 @asynccontextmanager
 async def _running_service(
-    host: str, port: int, dsn: str, client_id: str, reconnect_initial_seconds: float = 1.0
+    host: str,
+    port: int,
+    dsn: str,
+    client_id: str,
+    reconnect_initial_seconds: float = 1.0,
+    health: HealthState | None = None,
 ) -> AsyncIterator[tuple[Counters, asyncio.Task[None]]]:
     settings = IngestSettings(
         mqtt_host=host,
@@ -99,10 +105,11 @@ async def _running_service(
         client_id=client_id,
         db_dsn=dsn,
         reconnect_initial_seconds=reconnect_initial_seconds,
+        ops_port=0,  # ephemeral: parallel tests must not fight over 8080
     )
     counters = Counters()
     stop = asyncio.Event()
-    task = asyncio.create_task(run(settings, counters=counters, stop=stop))
+    task = asyncio.create_task(run(settings, counters=counters, stop=stop, health=health))
     try:
         yield counters, task
     finally:
@@ -337,3 +344,6 @@ async def test_out_of_order_arrival_ingests_fine(
     assert counters.ingested == 2
     assert counters.deduplicated == 0
     assert counters.dead_lettered == 0
+    # The in-memory arrival observation behind /metrics: the older reading
+    # arrived after a newer one had been seen for the same device.
+    assert counters.out_of_order == 1

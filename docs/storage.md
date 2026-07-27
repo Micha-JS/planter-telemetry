@@ -159,8 +159,11 @@ ON CONFLICT (device_id) DO UPDATE SET
 no read-modify-write. Timestamps are device time (`measured_at`), not
 arrival time, so M4's gap detection compares like with like on the device
 timeline. Per-message (rather than throttled) updates are the simplest
-correct thing at ~2–4 msg/s fleet-wide; M5's micro-batching is the place to
-revisit that if scale ever changes. `metadata jsonb` is room for M4+
+correct thing at ~2–4 msg/s fleet-wide; M5's replay-at-speed turned out to
+be absorbed comfortably by the same row-at-a-time path (CI's replay-smoke
+pushes the whole sample window through in firehose mode), so micro-batching
+remains the documented upgrade path if scale ever demands it, not something
+the current load justifies. `metadata jsonb` is room for M4+
 (display names, location) without a migration per attribute.
 
 ## Example queries

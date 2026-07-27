@@ -11,7 +11,7 @@ itself — dedupes, dead-letters, out-of-order arrivals, missed check-ins), and
 **replay/time-travel** (re-run any historical window at speed, safe because ingestion
 is idempotent).
 
-**Status: M4 — dashboard.** See
+**Status: M5 — ops polish + replay.** See
 [planter-telemetry-plan.md](planter-telemetry-plan.md) for the full milestone plan.
 
 ## Architecture
@@ -125,6 +125,7 @@ Configuration via environment variables (set them on the `simulator` service in
 | `SIM_OUT_OF_ORDER_RATE` | `0.03` | chance per wake-up of a reading being delivered 1–3 wake-ups late |
 | `SIM_MALFORMED_RATE` | `0.02` | chance per wake-up of a corrupted payload (rotating: truncated JSON, wrong types, missing fields) |
 | `SIM_MISSED_CHECKIN_RATE` | `0.03` | chance per wake-up of the device skipping a check-in entirely |
+| `SIM_HEARTBEAT_PATH` | `/tmp/planter-simulator-heartbeat` | file touched after each accepted publish; the compose healthcheck asserts it is fresh |
 
 ## Ingestion
 
@@ -148,7 +149,9 @@ Configuration via environment variables (set them on the `ingestion` service in
 | `INGEST_DB_DSN` | `postgresql://planter:planter@localhost:5433/planter` | TimescaleDB connection string (default matches the compose stack's host port) |
 | `INGEST_RECONNECT_INITIAL_SECONDS` | `1` | first reconnect delay after broker/DB loss |
 | `INGEST_RECONNECT_MAX_SECONDS` | `30` | reconnect backoff cap |
-| `INGEST_STATS_INTERVAL_SECONDS` | `30` | cadence of the `ingested/deduplicated/dead_lettered` stats log line |
+| `INGEST_STATS_INTERVAL_SECONDS` | `30` | cadence of the `stats` counter log event |
+| `INGEST_OPS_HOST` | `127.0.0.1` | bind address for `/healthz` + `/metrics` (loopback: the compose healthcheck runs in-container) |
+| `INGEST_OPS_PORT` | `8080` | port for `/healthz` + `/metrics`; `0` binds an ephemeral port (used by tests) |
 
 ## Storage
 
@@ -193,6 +196,91 @@ Configuration via environment variables (read by `docker-compose.yml`; the
 | `GRAFANA_DB_USER` | `grafana_reader` | database role the datasource connects as |
 | `GRAFANA_DB_PASSWORD` | `grafana_reader` | its password (dev-only, created by migration `0007`) |
 
+## Ops
+
+### Healthchecks
+
+`docker compose ps` shows every long-running service healthy — and each check
+proves the service's *dependency*, not merely a live process:
+
+| Service | Healthy means |
+|---|---|
+| `mosquitto` | a real `mosquitto_pub` round-trip succeeds |
+| `timescaledb` | `pg_isready` over TCP (initdb's socket-only phase can't pass early) |
+| `ingestion` | its own `/healthz` returns 200: subscribed to the broker **and** writing to the database |
+| `simulator` | the heartbeat file (`SIM_HEARTBEAT_PATH`) is fresher than 30 s — touched only after a publish accepted while connected |
+| `grafana` | the provisioned datasource health check runs `SELECT 1` against TimescaleDB as `grafana_reader` |
+
+`migrate` is one-shot and shows `Exited (0)` instead; ingestion and Grafana
+gate on it via `service_completed_successfully`.
+
+### Health and metrics endpoints
+
+The ingestion service serves two endpoints on a side port
+(`INGEST_OPS_HOST:INGEST_OPS_PORT`, container-internal by default):
+
+- `GET /healthz` — `200 {"status": "healthy", ...}` when subscribed to the
+  broker and writing to the database; `503 unhealthy` otherwise, with both
+  connection flags in the body for diagnosis. There is deliberately no
+  "degraded" state: the service has one reconnect path that tears down and
+  rebuilds both connections together, so 503 simply covers "starting" and
+  "reconnecting".
+- `GET /metrics` — Prometheus text format: the ingestion counters
+  (`planter_ingestion_{ingested,deduplicated,dead_lettered,out_of_order}_total`)
+  plus process/platform basics. The metrics are a live view over the same
+  in-memory counters the `stats` log event reports — not a second
+  bookkeeping system; the SQL derivations behind the dashboard remain the
+  source of truth. Wiring an actual Prometheus server is future work — the
+  endpoint is scrape-ready.
+
+### Structured logs
+
+Every service logs one JSON object per line on stderr. The message is a
+constant event name; everything variable travels in fields:
+
+```json
+{"ts": "2026-07-27T12:00:00.123456+00:00", "level": "INFO", "service": "ingestion",
+ "logger": "planter_telemetry.ingestion", "event": "stats",
+ "ingested": 1412, "deduplicated": 63, "dead_lettered": 28, "out_of_order": 41}
+```
+
+`docker compose logs ingestion | grep '"event": "dead_letter"'` is a query,
+not an archaeology session.
+
+### Capture & replay
+
+The `planter-telemetry` CLI (also `python -m planter_telemetry.cli`) captures
+a live message window to newline-delimited JSON and replays it later —
+through MQTT, never by writing to the database, so replayed traffic exercises
+exactly the ingestion path live traffic takes:
+
+```bash
+# capture 100 messages (or stop after 60 s, whichever comes first)
+uv run planter-telemetry capture --count 100 --duration 60 --out window.jsonl
+
+# replay at 100x (default): captured gaps compressed, payloads byte-identical
+uv run planter-telemetry replay window.jsonl
+
+# firehose mode, reading from stdin
+uv run planter-telemetry replay --no-delay - < window.jsonl
+```
+
+Payloads replay byte-identical — `measured_at` is *not* rewritten, because
+rewriting would forge new readings and defeat the idempotency that makes
+replay safe. A committed, deterministically generated sample window ships in
+[`samples/telemetry-window.jsonl`](samples/telemetry-window.jsonl)
+(3 devices, ~5.5 virtual hours, duplicates/garbage included), so the demo
+works on a fresh clone with zero prior capture:
+
+```bash
+uv run planter-telemetry replay --no-delay - < samples/telemetry-window.jsonl
+```
+
+Run it twice: the second pass changes nothing — that is the idempotency
+story, and CI asserts it (`make replay-smoke`: all services healthy → replay
+→ row count and checksum → replay again → checksum unchanged → the window is
+visible through Grafana).
+
 ## Development
 
 Dependencies are managed with [uv](https://docs.astral.sh/uv/):
@@ -208,6 +296,8 @@ make lint         # ruff format --check + ruff check
 make typecheck    # mypy --strict
 make test         # pytest (unit tests)
 make integration  # pytest -m integration: real broker + TimescaleDB via testcontainers
+make sample       # regenerate samples/telemetry-window.jsonl (guarded by tests/test_sample.py)
+make replay-smoke # compose up → all healthy → replay the sample twice → idempotency proven
 ```
 
 ## License

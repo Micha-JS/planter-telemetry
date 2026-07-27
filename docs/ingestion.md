@@ -95,10 +95,13 @@ Row-at-a-time, on purpose. The default simulator produces ~2–4 messages/second
 (4 devices, 300 virtual-second cadence at 180× acceleration); a single INSERT
 per message is nowhere near any limit at this scale, and it keeps dedupe
 counting (`rowcount` after `ON CONFLICT DO NOTHING`) and shutdown draining
-trivial. When M5's replay-at-100× needs more throughput, the upgrade path is
-micro-batching in `db.Writer` (flush every N messages / T ms with
-`executemany`) behind the same interface — correctness is unaffected either
-way because idempotency does not depend on batching.
+trivial. M5's replay-at-speed did not change the math: even `--no-delay`
+firehose replay of the committed sample window is absorbed by row-at-a-time
+writes (CI's `make replay-smoke` proves it end-to-end), and `--speed 100`
+paces slower than the live simulator. If scale ever demands more, the upgrade
+path is still micro-batching in `db.Writer` (flush every N messages / T ms
+with `executemany`) behind the same interface — correctness is unaffected
+either way because idempotency does not depend on batching.
 
 ## Failure behavior
 
@@ -108,9 +111,22 @@ way because idempotency does not depend on batching.
 - **Shutdown (SIGTERM/SIGINT):** stop consuming, finish the in-flight message,
   close both connections, log a final `ingested/deduplicated/dead_lettered`
   summary.
-- **Observability:** a stats line with those three counters every 30 s
-  (`INGEST_STATS_INTERVAL_SECONDS`); every dead letter logs a warning with its
-  reason. JSON logging arrives with the ops polish in M5.
+- **Observability:** a `stats` event with the running counters every 30 s
+  (`INGEST_STATS_INTERVAL_SECONDS`); every dead letter logs a `dead_letter`
+  warning with its reason. All logs are structured JSON on stderr — one object
+  per line with `ts`, `level`, `service`, `logger`, `event`, plus per-event
+  fields such as `device_id` or the counter values (see
+  `planter_telemetry/jsonlog.py`; the message is a constant event name, all
+  variability travels in fields).
+- **Health:** `/healthz` on the ops port (`INGEST_OPS_HOST:INGEST_OPS_PORT`)
+  returns 200 only while subscribed *and* writing — the flags flip inside the
+  reconnect loop itself. Because that loop tears down both connections
+  together, there is no separate "degraded" state to report: 503 covers
+  "starting" (the compose healthcheck's `start_period` absorbs it) and
+  "reconnecting", and the body carries both flags plus the counters for
+  diagnosis. `/metrics` on the same port exposes the counters in Prometheus
+  text format as a live view (`ops.CountersCollector`), never as separate
+  bookkeeping.
 
 ## Proof
 
