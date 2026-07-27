@@ -1,0 +1,14 @@
+# Provisioned dashboard provider: every JSON file in grafana/dashboards/
+# (mounted at the path below) is loaded automatically — no importing, ever.
+apiVersion: 1
+
+providers:
+  - name: planter
+    type: file
+    # The repo JSON is the only source of truth: no UI saves, no deletion.
+    disableDeletion: true
+    allowUiUpdates: false
+    # Hot-reload while iterating: edit the JSON on disk, see it live in 30s.
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

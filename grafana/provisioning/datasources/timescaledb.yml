@@ -1,0 +1,26 @@
+# Provisioned TimescaleDB datasource — no clicking "add datasource", ever.
+# Dashboards reference this by uid; the name is display-only.
+apiVersion: 1
+
+datasources:
+  - name: TimescaleDB
+    uid: planter-timescaledb
+    type: postgres
+    access: proxy
+    url: timescaledb:5432
+    # Grafana expands $VAR from its own container environment (set on the
+    # grafana service in docker-compose.yml): the read-only grafana_reader
+    # role created by migration 0007.
+    user: $GRAFANA_DB_USER
+    jsonData:
+      database: planter
+      sslmode: disable
+      # Makes Grafana's query macros emit time_bucket() and surfaces
+      # Timescale-aware query building.
+      timescaledb: true
+      postgresVersion: 1700
+    secureJsonData:
+      password: $GRAFANA_DB_PASSWORD
+    isDefault: true
+    # The repo is the source of truth; the UI must not fork it.
+    editable: false

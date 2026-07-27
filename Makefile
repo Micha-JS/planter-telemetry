@@ -1,4 +1,4 @@
-.PHONY: lint typecheck test integration up down down-clean migrate smoke sim-smoke ingest-smoke
+.PHONY: lint typecheck test integration up down down-clean migrate smoke sim-smoke ingest-smoke grafana-smoke
 
 lint:
 	uv run ruff format --check .
@@ -81,4 +81,35 @@ ingest-smoke:
 		if [ $$i -eq 60 ]; then echo "no new telemetry rows after 60s" >&2; exit 1; fi; \
 	done
 	docker compose ps --status running --format '{{.Service}}' | grep -qx ingestion
+	docker compose down
+
+# Provisioning end-to-end: grafana's healthcheck runs the datasource health
+# check (SELECT 1 against TimescaleDB as grafana_reader), so "healthy" already
+# proves migrate created the role and the provisioned datasource connects.
+# Then: the dashboard loads anonymously by uid, the datasource exists by uid
+# (admin API), and a real query through grafana's /api/ds/query returns data
+# frames. All HTTP runs inside the grafana container via busybox wget — no
+# host dependencies.
+grafana-smoke:
+	docker compose up -d --build
+	for i in $$(seq 1 60); do \
+		status=$$(docker inspect -f '{{.State.Health.Status}}' \
+			$$(docker compose ps -q grafana)); \
+		[ "$$status" = "healthy" ] && break; \
+		sleep 2; \
+		if [ $$i -eq 60 ]; then \
+			echo "grafana never became healthy" >&2; \
+			docker compose logs grafana >&2; exit 1; \
+		fi; \
+	done
+	docker compose exec -T grafana wget -q -O /dev/null \
+		http://127.0.0.1:3000/api/dashboards/uid/planter-fleet
+	docker compose exec -T grafana sh -ec 'wget -q -O - \
+		"http://admin:$$GF_SECURITY_ADMIN_PASSWORD@127.0.0.1:3000/api/datasources/uid/planter-timescaledb" \
+		| grep -q "\"uid\":\"planter-timescaledb\""'
+	docker compose exec -T grafana sh -ec 'wget -q -O - \
+		--header "Content-Type: application/json" \
+		--post-data "{\"queries\":[{\"refId\":\"A\",\"datasource\":{\"uid\":\"planter-timescaledb\"},\"format\":\"table\",\"rawSql\":\"SELECT count(*) FROM telemetry\"}]}" \
+		http://127.0.0.1:3000/api/ds/query \
+		| grep -q "\"frames\""'
 	docker compose down
