@@ -45,11 +45,13 @@ def connect_with_retry(
             if attempt == attempts:
                 raise
             logger.info(
-                "broker %s:%d not ready (attempt %d/%d), retrying",
-                settings.mqtt_host,
-                settings.mqtt_port,
-                attempt,
-                attempts,
+                "broker_wait",
+                extra={
+                    "host": settings.mqtt_host,
+                    "port": settings.mqtt_port,
+                    "attempt": attempt,
+                    "attempts": attempts,
+                },
             )
             time.sleep(delay_seconds)
         else:
@@ -64,17 +66,18 @@ def _raise_keyboard_interrupt(signum: int, frame: FrameType | None) -> None:
 
 def run(settings: SimulatorSettings) -> None:
     """Publish the emission stream forever, pacing it by the wall clock."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     # `docker compose stop/down` sends SIGTERM; route it through the same
     # KeyboardInterrupt path as Ctrl-C so the finally block disconnects
     # cleanly instead of the interpreter dying mid-publish.
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     logger.info(
-        "starting: %d devices, seed=%d, acceleration=%gx, interval=%gs (virtual)",
-        settings.device_count,
-        settings.seed,
-        settings.acceleration,
-        settings.interval_seconds,
+        "starting",
+        extra={
+            "device_count": settings.device_count,
+            "seed": settings.seed,
+            "acceleration": settings.acceleration,
+            "interval_seconds": settings.interval_seconds,
+        },
     )
     client = connect_with_retry(settings)
     anchor = datetime.now(UTC)
@@ -96,22 +99,24 @@ def run(settings: SimulatorSettings) -> None:
                 # paho queues the message for redelivery once the connection
                 # is back; log honestly instead of pretending it went out.
                 logger.warning(
-                    "publish to %s failed (%s), queued for reconnect",
-                    topic,
-                    mqtt.error_string(result.rc),
+                    "publish_failed",
+                    extra={"topic": topic, "error": mqtt.error_string(result.rc)},
                 )
                 continue
             logger.info(
-                "%s %s%s water=%.1f%% battery=%.3fV measured_at=%s",
-                topic,
-                emission.kind,
-                f" corruption={emission.corruption.value}" if emission.corruption else "",
-                emission.reading.water_level,
-                emission.reading.battery_voltage,
-                emission.reading.measured_at.isoformat(),
+                "publish",
+                extra={
+                    "topic": topic,
+                    "device_id": emission.reading.device_id,
+                    "kind": emission.kind,
+                    "corruption": emission.corruption.value if emission.corruption else None,
+                    "water_level": emission.reading.water_level,
+                    "battery_voltage": emission.reading.battery_voltage,
+                    "measured_at": emission.reading.measured_at.isoformat(),
+                },
             )
     except KeyboardInterrupt:
-        logger.info("interrupted, disconnecting")
+        logger.info("interrupted")
     finally:
         client.loop_stop()
         client.disconnect()

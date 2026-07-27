@@ -108,9 +108,13 @@ way because idempotency does not depend on batching.
 - **Shutdown (SIGTERM/SIGINT):** stop consuming, finish the in-flight message,
   close both connections, log a final `ingested/deduplicated/dead_lettered`
   summary.
-- **Observability:** a stats line with those three counters every 30 s
-  (`INGEST_STATS_INTERVAL_SECONDS`); every dead letter logs a warning with its
-  reason. JSON logging arrives with the ops polish in M5.
+- **Observability:** a `stats` event with the running counters every 30 s
+  (`INGEST_STATS_INTERVAL_SECONDS`); every dead letter logs a `dead_letter`
+  warning with its reason. All logs are structured JSON on stderr — one object
+  per line with `ts`, `level`, `service`, `logger`, `event`, plus per-event
+  fields such as `device_id` or the counter values (see
+  `planter_telemetry/jsonlog.py`; the message is a constant event name, all
+  variability travels in fields).
 
 ## Proof
 

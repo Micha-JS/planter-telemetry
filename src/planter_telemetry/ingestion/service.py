@@ -16,7 +16,7 @@ import logging
 import signal
 from collections import deque
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import aiomqtt
@@ -105,25 +105,22 @@ async def _handle_one(item: tuple[str, bytes], writer: Writer, counters: Counter
             await writer.record_dedupe(outcome.reading)
             counters.deduplicated += 1
             logger.debug(
-                "deduplicated %s @ %s",
-                outcome.reading.device_id,
-                outcome.reading.measured_at.isoformat(),
+                "deduplicated",
+                extra={
+                    "device_id": outcome.reading.device_id,
+                    "measured_at": outcome.reading.measured_at.isoformat(),
+                },
             )
     else:
         await writer.insert_dead_letter(outcome)
         counters.dead_lettered += 1
-        logger.warning("dead-lettered message on %s: %s", outcome.topic, outcome.reason)
+        logger.warning("dead_letter", extra={"topic": outcome.topic, "reason": outcome.reason})
 
 
 async def _log_stats(counters: Counters, interval_seconds: float) -> None:
     while True:
         await asyncio.sleep(interval_seconds)
-        logger.info(
-            "ingested=%d deduplicated=%d dead_lettered=%d",
-            counters.ingested,
-            counters.deduplicated,
-            counters.dead_lettered,
-        )
+        logger.info("stats", extra=asdict(counters))
 
 
 async def run(
@@ -174,11 +171,13 @@ async def run(
                     # covers a fresh or expired session.
                     await client.subscribe(TELEMETRY_TOPIC_FILTER, qos=1)
                     logger.info(
-                        "consuming %s from %s:%d as %r",
-                        TELEMETRY_TOPIC_FILTER,
-                        settings.mqtt_host,
-                        settings.mqtt_port,
-                        settings.client_id,
+                        "consuming",
+                        extra={
+                            "topic_filter": TELEMETRY_TOPIC_FILTER,
+                            "host": settings.mqtt_host,
+                            "port": settings.mqtt_port,
+                            "client_id": settings.client_id,
+                        },
                     )
                     backoff = settings.reconnect_initial_seconds
                     messages = client.messages
@@ -213,10 +212,12 @@ async def run(
                 if stop.is_set():
                     break  # shutting down; the final flush below owns `pending`
                 logger.warning(
-                    "connection lost (%s: %s); reconnecting in %.1fs",
-                    type(exc).__name__,
-                    exc,
-                    backoff,
+                    "reconnect",
+                    extra={
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "backoff_seconds": backoff,
+                    },
                 )
                 await _wait_for_stop(stop, backoff)
                 backoff = min(backoff * 2, settings.reconnect_max_seconds)
@@ -238,19 +239,12 @@ async def run(
                     finally:
                         await flush_writer.close()
             except Exception:
-                logger.error(
-                    "dropping %d acked message(s) unwritten: database unreachable at shutdown",
-                    len(pending),
-                )
+                # The broker considers these delivered and will not redeliver.
+                logger.error("acked_messages_dropped", extra={"count": len(pending)})
     finally:
         stats_task.cancel()
         with suppress(asyncio.CancelledError):
             await stats_task
         for sig in handled_signals:
             loop.remove_signal_handler(sig)
-        logger.info(
-            "shutting down: ingested=%d deduplicated=%d dead_lettered=%d",
-            counters.ingested,
-            counters.deduplicated,
-            counters.dead_lettered,
-        )
+        logger.info("shutdown", extra=asdict(counters))
