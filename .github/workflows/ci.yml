@@ -65,3 +65,23 @@ jobs:
         run: |
           docker compose up -d
           docker compose down -v
+
+  hardware-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hardware-mode compose merge parses; hardware broker config boots
+        # Validation only, with a throwaway passwd file — hardware mode never
+        # enters the default smoke path (that is the point of the override).
+        run: make hardware-config-check
+
+  docs-links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docs have no dead relative links or anchors
+        # Offline-only: http(s) URLs are skipped by design, so this job cannot
+        # fail on someone else's downtime.
+        run: make link-check

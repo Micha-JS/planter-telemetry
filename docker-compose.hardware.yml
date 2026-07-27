@@ -1,0 +1,31 @@
+# Opt-in hardware mode: adds an authenticated, LAN-published broker listener
+# (1884) for real ESP32 pods. Purely additive — the default demo path never
+# references this file.
+#
+#   make hardware-up
+#   # or, spelled out:
+#   docker compose -f docker-compose.yml -f docker-compose.hardware.yml up -d --build
+#
+# See docs/hardware-bridge.md for the full bring-up walkthrough.
+services:
+  mosquitto:
+    ports:
+      # Compose APPENDS override ports to the base list, so the loopback-only
+      # 127.0.0.1:1883 binding survives unchanged. 1884 is deliberately bound
+      # on all interfaces — that LAN exposure is safe only because the 1884
+      # listener requires authentication (mosquitto.hardware.conf) and is
+      # scoped by the ACL.
+      - "1884:1884"
+    volumes:
+      # Same container target as the base mount, so compose REPLACES the demo
+      # mosquitto.conf with the hardware one (ports append; volumes with an
+      # identical target override).
+      - ./mosquitto/mosquitto.hardware.conf:/mosquitto/config/mosquitto.conf:ro
+      # Directory mount, deliberately, and deliberately rw:
+      #  - mosquitto_passwd rewrites the file via write-temp-then-rename,
+      #    which fails through a single-file bind mount;
+      #  - a missing single-file mount source would make docker silently
+      #    create a host DIRECTORY named passwd. With the directory mount a
+      #    missing passwd file instead fails loudly (make hardware-up
+      #    preflights it with a helpful message).
+      - ./mosquitto/auth:/mosquitto/auth

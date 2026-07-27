@@ -11,7 +11,13 @@ itself — dedupes, dead-letters, out-of-order arrivals, missed check-ins), and
 **replay/time-travel** (re-run any historical window at speed, safe because ingestion
 is idempotent).
 
-**Status: M5 — ops polish + replay.** See
+![The committed sample window replayed through the broker while the dashboard fills](docs/img/demo.gif)
+
+*Top: the committed sample window replayed at `--speed 100`, with
+`mosquitto_sub` showing it cross the broker. Bottom: the provisioned dashboard
+filling in — a timelapse of screenshots taken during that same replay.*
+
+**Status: M6 — real-hardware bridge + docs.** See
 [planter-telemetry-plan.md](planter-telemetry-plan.md) for the full milestone plan.
 
 ## Architecture
@@ -23,7 +29,9 @@ Device simulator (default demo mode)       ─┘   (Mosquitto)    (typed Python
 ```
 
 Everything runs via `docker compose up`, with a device simulator as the default
-data source — real hardware is an optional backend, never a requirement.
+data source — real hardware is an optional backend, never a requirement. The
+tour of what each component is for, and why it was chosen, is in
+[docs/architecture.md](docs/architecture.md).
 
 ## Quickstart
 
@@ -86,12 +94,50 @@ check-ins). The default time range reaches into the *future* (`now → now+7d`)
 for the same reason; details in
 [docs/dashboard-queries.md](docs/dashboard-queries.md).
 
+Finally, replay the committed sample window through the broker — the same
+path live traffic takes, as fast as the broker will accept it:
+
+```bash
+docker compose exec -T ingestion uv run --no-sync planter-telemetry replay \
+  --host mosquitto --no-delay - < samples/telemetry-window.jsonl
+```
+
+That finishes in about a second and adds 185 readings dated January 2026
+(view them at `from=2026-01-01&to=2026-01-02`). Swap `--no-delay` for
+`--speed 100` to watch it arrive paced instead, as in the GIF above — that
+takes about three minutes of wall clock for the window's 5.3 virtual hours.
+
+Run it a second time and nothing changes: readings are keyed by
+`(device_id, measured_at)` and written with `ON CONFLICT DO NOTHING`, so
+replay is idempotent by construction — and CI asserts exactly that
+(`make replay-smoke`).
+
 If you have mosquitto clients installed on your host,
 `mosquitto_sub -h localhost -t 'planter/v1/+/telemetry' -v` works the same way
 against port 1883, and `psql` reaches the database on `localhost:5433`
 (user/password/db all `planter`). Tear down with `docker compose down` — data
 persists in a named volume across restarts; `make down-clean` also removes it,
 so the next `up` starts from an empty, freshly migrated database.
+
+**Timings**, measured on an Apple M1 with a fast connection, from a genuinely
+cold state — fresh clone, no images, no build cache:
+
+| | Cold | Warm |
+|---|---|---|
+| `docker compose up -d --build` returns | 72 s | 9 s |
+| all five services healthy | 80 s | — |
+| dashboard showing live readings | **89 s** | **20 s** |
+
+Cold means the ~2.8 GB of images (TimescaleDB, Grafana, Mosquitto, plus the
+Python base) were pulled during that 72 s, so a slower connection moves this
+number and little else. To reproduce the cold state:
+
+```bash
+docker compose down -v --rmi local        # or: make down-clean, to keep the images
+docker image rm eclipse-mosquitto:2 timescale/timescaledb:2.28.3-pg17 \
+  grafana/grafana:12.3.0 python:3.12-slim ghcr.io/astral-sh/uv:0.11.14
+docker builder prune -f
+```
 
 The wire format, topic tree, versioning policy, and idempotency key are documented
 in [docs/message-contract.md](docs/message-contract.md).
@@ -281,6 +327,32 @@ story, and CI asserts it (`make replay-smoke`: all services healthy → replay
 → row count and checksum → replay again → checksum unchanged → the window is
 visible through Grafana).
 
+## Real hardware (opt-in)
+
+Demo mode keeps the anonymous, loopback-bound broker untouched; hardware mode
+is a compose override that adds a second, password- and ACL-protected listener
+on LAN port 1884 to the same broker — so real pods and the simulator feed one
+identical pipeline with zero application-code changes.
+
+```bash
+make hardware-passwd DEVICE=planter-a4cf12   # create a device credential
+make hardware-up                             # demo stack + LAN listener on 1884
+```
+
+The default quickstart above never changes, whether or not you use this.
+[docs/hardware-bridge.md](docs/hardware-bridge.md) is the contract the firmware
+must meet: topics, payload schema, credentials, deep-sleep guidance, and a
+"first successful reading" checklist.
+
+## Documentation
+
+- [architecture.md](docs/architecture.md) — diagram, component rationale, the idempotency story (5-minute read)
+- [message-contract.md](docs/message-contract.md) — wire format, topic tree, versioning policy
+- [ingestion.md](docs/ingestion.md) — consumer layering, delivery semantics, failure behavior
+- [storage.md](docs/storage.md) — hypertable, continuous aggregates, migrations
+- [dashboard-queries.md](docs/dashboard-queries.md) — every panel's SQL, with rationale
+- [hardware-bridge.md](docs/hardware-bridge.md) — pointing a real ESP32 pod at the stack
+
 ## Development
 
 Dependencies are managed with [uv](https://docs.astral.sh/uv/):
@@ -298,7 +370,22 @@ make test         # pytest (unit tests)
 make integration  # pytest -m integration: real broker + TimescaleDB via testcontainers
 make sample       # regenerate samples/telemetry-window.jsonl (guarded by tests/test_sample.py)
 make replay-smoke # compose up → all healthy → replay the sample twice → idempotency proven
+make link-check   # docs: no dead relative links or anchors (offline)
+make hardware-config-check  # hardware-mode compose merge + broker config boot test
 ```
+
+## Future work
+
+- **M7 — analytics (next).** Per-planter depletion model over recent
+  depletion segments → a refill-by forecast ("empty in ~4 days"), the same
+  mechanism for battery life, and alerting on the forecast horizon rather
+  than a raw threshold. The point of the whole pipeline: tell you when to
+  water, not that you should have.
+- **Anomaly detection.** Leak, wick-failure, and sensor-fault baselines on
+  top of the same per-device history.
+- **Closed-loop auto-watering** — the "write path" companion to this repo's
+  read path: acting on a forecast instead of reporting it. Deliberately out
+  of scope here; it belongs in its own project with its own safety story.
 
 ## License
 

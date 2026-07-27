@@ -1,4 +1,4 @@
-.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke replay-smoke
+.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke replay-smoke hardware-up hardware-down hardware-passwd hardware-config-check link-check
 
 # What ingesting samples/telemetry-window.jsonl must produce, pinned in
 # src/planter_telemetry/cli/sample.py and verified by tests/test_sample.py:
@@ -13,6 +13,15 @@ lint:
 
 typecheck:
 	uv run mypy
+
+# Docs are deliverables: every relative link and image path in the markdown
+# must resolve. --offline skips http(s) URLs entirely by design, so this can
+# never flake on the network or on someone else's rate limit. The pinned
+# image keeps results reproducible.
+link-check:
+	docker run --rm --init -w /repo -v "$(CURDIR)":/repo lycheeverse/lychee:0.24.2 \
+		--offline --include-fragments --no-progress --root-dir /repo \
+		'./**/*.md'
 
 test:
 	uv run pytest
@@ -204,3 +213,140 @@ replay-smoke:
 		echo "replayed window not visible through grafana (count=$${count:-unparsed})" >&2; \
 		exit 1; }
 	docker compose down
+
+# --------------------------------------------------------------- hardware mode
+# Opt-in: the demo stack plus an authenticated LAN listener on 1884 for real
+# ESP32 pods. The default demo path never touches these targets or files.
+# See docs/hardware-bridge.md.
+HW_COMPOSE = docker compose -f docker-compose.yml -f docker-compose.hardware.yml
+
+# Preflight the password file so mosquitto fails helpfully, not mysteriously
+# (the broker exits at boot when password_file is missing). -s, not -f: an
+# empty passwd file boots a broker that refuses every device, which looks
+# identical to a wrong password.
+hardware-up:
+	@test -s mosquitto/auth/passwd || { \
+		echo "mosquitto/auth/passwd missing or empty — create your first device user:" >&2; \
+		echo "  make hardware-passwd DEVICE=<device_id>" >&2; \
+		exit 1; }
+	$(HW_COMPOSE) up -d --build
+
+hardware-down:
+	$(HW_COMPOSE) down
+
+# Create or update one device credential (interactive password prompt), then
+# hot-reload the broker if it is running (SIGHUP re-reads password_file and
+# acl_file). Runs mosquitto_passwd inside the broker image so the file's
+# ownership and permissions come out broker-readable on every platform.
+# The MQTT username must equal the device_id (see docs/message-contract.md).
+#
+# A failed mosquitto_passwd (mistyped confirmation, empty password, Ctrl-C)
+# must fail the target: `a && b && c` hides b's exit status from `set -e`
+# (only the LAST command of an AND list is checked), so the failure is
+# handled explicitly instead — otherwise this would report success and leave
+# behind the empty file `touch` just made, which hardware-up would then
+# happily boot a device-refusing broker from. chmod runs before the prompt
+# too, so mosquitto_passwd doesn't warn about the fresh file being readable.
+hardware-passwd:
+	@test -n "$(DEVICE)" || { echo "usage: make hardware-passwd DEVICE=<device_id>" >&2; exit 1; }
+	@echo "$(DEVICE)" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,31}$$' || { \
+		echo "DEVICE must match ^[a-z0-9][a-z0-9_-]{0,31}$$ (username == device_id)" >&2; \
+		exit 1; }
+	docker run --rm -it -v "$(CURDIR)/mosquitto/auth":/mosquitto/auth eclipse-mosquitto:2 \
+		sh -ec 'touch /mosquitto/auth/passwd; \
+			chmod 0700 /mosquitto/auth/passwd; \
+			if ! mosquitto_passwd /mosquitto/auth/passwd $(DEVICE); then \
+				[ -s /mosquitto/auth/passwd ] || rm -f /mosquitto/auth/passwd; \
+				echo "no credential was created" >&2; \
+				exit 1; \
+			fi; \
+			chown mosquitto:mosquitto /mosquitto/auth/passwd 2>/dev/null || true; \
+			chmod 0700 /mosquitto/auth/passwd'
+	@cid=$$($(HW_COMPOSE) ps -q mosquitto 2>/dev/null); \
+	if [ -z "$$cid" ] || [ "$$(docker inspect -f '{{.State.Running}}' $$cid 2>/dev/null)" != "true" ]; then \
+		echo "broker not running — credentials take effect on next hardware-up"; \
+	elif ! docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' $$cid \
+			| grep -q 'mosquitto\.hardware\.conf'; then \
+		echo "broker is running in DEMO mode (no 1884 listener, no password_file) —" >&2; \
+		echo "credentials take effect after: make hardware-up" >&2; \
+	elif docker kill -s HUP $$cid >/dev/null; then \
+		echo "broker reloaded (SIGHUP)"; \
+	else \
+		echo "broker reload failed — apply the credential with: make hardware-up" >&2; \
+		exit 1; \
+	fi
+
+# Validates hardware mode without running it through the demo compose project:
+#   1. both compose file combinations parse, and the merge does what the
+#      override relies on (hardware conf replaces the demo conf, 1884 is
+#      published, the loopback-only 1883 binding survives);
+#   2. the hardware mosquitto config actually boots a broker — mosquitto has
+#      no config-lint flag, so a bare `docker run` (no compose project, no
+#      name/network collisions) with a THROWAWAY passwd file proves it, plus:
+#      anonymous is refused on 1884, an authenticated QoS-1 publish on 1884
+#      reaches a subscriber on 1883 (cross-listener routing + passwd parsing
+#      + ACL grant), and a publish to another device's topic never arrives
+#      (MQTT 3.1.1 drops ACL-denied publishes silently, so absence is the
+#      only observable; mosquitto_sub -W exits nonzero on timeout, hence
+#      the `|| true`). Never touches mosquitto/auth/passwd.
+#
+# Both publish tests republish on a loop rather than sleeping once and hoping:
+# the messages are QoS 1 but NOT retained, so anything published before the
+# subscriber's SUBSCRIBE completes is gone, and a single fixed head start is a
+# race that fails CI on a contended runner. Republishing also keeps the
+# absence-based ACL check honest — it observes silence across a whole window,
+# not at one instant.
+hardware-config-check:
+	docker compose config -q
+	$(HW_COMPOSE) config -q
+	$(HW_COMPOSE) config | grep -q 'mosquitto.hardware.conf'
+	$(HW_COMPOSE) config | grep -q 'published: "1884"'
+	$(HW_COMPOSE) config | grep -q 'host_ip: 127.0.0.1'
+	set -e; \
+	tmp=$$(mktemp -d /tmp/planter-hwcheck.XXXXXX); \
+	cid=""; \
+	trap 'docker rm -f $$cid >/dev/null 2>&1 || true; rm -rf "$$tmp"' EXIT; \
+	docker run --rm -v "$$tmp":/auth eclipse-mosquitto:2 \
+		sh -ec 'mosquitto_passwd -c -b /auth/passwd ci-device ci-password; \
+			chown mosquitto:mosquitto /auth/passwd 2>/dev/null; \
+			chmod 0700 /auth/passwd'; \
+	cid=$$(docker run -d \
+		-v "$(CURDIR)/mosquitto/mosquitto.hardware.conf":/mosquitto/config/mosquitto.conf:ro \
+		-v "$(CURDIR)/mosquitto/auth/acl.conf":/mosquitto/auth/acl.conf:ro \
+		-v "$$tmp/passwd":/mosquitto/auth/passwd:ro \
+		eclipse-mosquitto:2); \
+	for i in $$(seq 1 30); do \
+		docker exec $$cid mosquitto_pub -p 1883 -t planter/ready -m ping 2>/dev/null && break; \
+		sleep 1; \
+		if [ $$i -eq 30 ]; then \
+			echo "hardware broker never came up" >&2; \
+			docker logs $$cid >&2; exit 1; \
+		fi; \
+	done; \
+	if docker exec $$cid mosquitto_pub -p 1884 -t planter/ready -m ping 2>/dev/null; then \
+		echo "anonymous publish ACCEPTED on 1884 — auth is broken" >&2; exit 1; \
+	fi; \
+	docker exec $$cid sh -ec ' \
+		mosquitto_sub -p 1883 -t planter/v1/ci-device/telemetry -C 1 -W 30 > /tmp/got & \
+		sub=$$!; \
+		i=0; \
+		until [ -s /tmp/got ] || [ $$i -ge 20 ]; do \
+			mosquitto_pub -p 1884 -u ci-device -P ci-password -q 1 \
+				-t planter/v1/ci-device/telemetry -m hw-ok; \
+			sleep 1; \
+			i=$$((i + 1)); \
+		done; \
+		wait $$sub; \
+		grep -qx hw-ok /tmp/got'; \
+	docker exec $$cid sh -ec ' \
+		mosquitto_sub -p 1883 -t planter/v1/other-device/telemetry -C 1 -W 8 > /tmp/leak & \
+		sub=$$!; \
+		i=0; \
+		while [ $$i -lt 6 ]; do \
+			mosquitto_pub -p 1884 -u ci-device -P ci-password -q 1 \
+				-t planter/v1/other-device/telemetry -m leaked || true; \
+			sleep 1; \
+			i=$$((i + 1)); \
+		done; \
+		wait $$sub || true; \
+		test ! -s /tmp/leak'
