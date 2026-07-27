@@ -26,10 +26,11 @@ services:
       # popular port for an already-running Postgres to be squatting on.
       - "127.0.0.1:5433:5432"
     volumes:
-      # Applied by the image on first boot. Deliberately no data volume in M2:
-      # every `up` starts from an empty database and re-runs the init script,
-      # keeping the demo deterministic. M3 formalizes migrations.
-      - ./db/init:/docker-entrypoint-initdb.d:ro
+      # Named volume since M3: data survives restarts, and the migrate
+      # service brings any database (empty or existing) to the current
+      # schema on every up. `make down-clean` (compose down -v) restores
+      # the fresh-demo behavior.
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       # -h 127.0.0.1 forces TCP: during initdb a temporary server listens on
       # the unix socket only, and a socket-based check would pass too early.
@@ -38,6 +39,19 @@ services:
       timeout: 3s
       retries: 15
       start_period: 10s
+
+  migrate:
+    build: .
+    init: true
+    # One-shot: alembic upgrade to head (stamping a pre-M3 database first),
+    # then exits. Ingestion waits for it, so it can never race the schema.
+    command: ["uv", "run", "--no-sync", "python", "-m", "planter_telemetry.migrate"]
+    restart: "no"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      INGEST_DB_DSN: postgresql://planter:planter@timescaledb:5432/planter
 
   ingestion:
     build: .
@@ -49,6 +63,8 @@ services:
         condition: service_healthy
       timescaledb:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       INGEST_MQTT_HOST: mosquitto
       INGEST_DB_DSN: postgresql://planter:planter@timescaledb:5432/planter
@@ -64,3 +80,6 @@ services:
       SIM_MQTT_HOST: mosquitto
       # All SIM_* knobs (device count, seed, acceleration, imperfection
       # rates) are documented in the README's Simulator section.
+
+volumes:
+  pgdata:

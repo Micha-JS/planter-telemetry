@@ -11,7 +11,7 @@ itself — dedupes, dead-letters, out-of-order arrivals, missed check-ins), and
 **replay/time-travel** (re-run any historical window at speed, safe because ingestion
 is idempotent).
 
-**Status: M2 — ingestion service.** See
+**Status: M3 — storage layer.** See
 [planter-telemetry-plan.md](planter-telemetry-plan.md) for the full milestone plan.
 
 ## Architecture
@@ -61,10 +61,21 @@ docker compose exec timescaledb psql -U planter -d planter \
   -c "SELECT topic, reason, received_at FROM dead_letter ORDER BY id DESC LIMIT 3"
 ```
 
+Query the per-device rollups (continuous aggregates, live from the first
+reading):
+
+```bash
+docker compose exec timescaledb psql -U planter -d planter \
+  -c "SELECT device_id, bucket, round(water_avg::numeric,1) AS water_avg, sample_count
+      FROM telemetry_hourly ORDER BY bucket DESC, device_id LIMIT 8"
+```
+
 If you have mosquitto clients installed on your host,
 `mosquitto_sub -h localhost -t 'planter/v1/+/telemetry' -v` works the same way
 against port 1883, and `psql` reaches the database on `localhost:5433`
-(user/password/db all `planter`). Tear down with `docker compose down`.
+(user/password/db all `planter`). Tear down with `docker compose down` — data
+persists in a named volume across restarts; `make down-clean` also removes it,
+so the next `up` starts from an empty, freshly migrated database.
 
 The wire format, topic tree, versioning policy, and idempotency key are documented
 in [docs/message-contract.md](docs/message-contract.md).
@@ -122,6 +133,16 @@ Configuration via environment variables (set them on the `ingestion` service in
 | `INGEST_RECONNECT_INITIAL_SECONDS` | `1` | first reconnect delay after broker/DB loss |
 | `INGEST_RECONNECT_MAX_SECONDS` | `30` | reconnect backoff cap |
 | `INGEST_STATS_INTERVAL_SECONDS` | `30` | cadence of the `ingested/deduplicated/dead_lettered` stats log line |
+
+## Storage
+
+The database is a TimescaleDB hypertable with hourly/daily per-device rollups
+(continuous aggregates), a columnstore policy for aging data, and a device
+registry maintained by ingestion. Schema changes are Alembic migrations —
+raw SQL, sequentially numbered, run automatically by a one-shot `migrate`
+service before ingestion starts, and proven in CI from an empty database.
+Design, rationale, and pasteable analytical queries:
+[docs/storage.md](docs/storage.md).
 
 ## Development
 

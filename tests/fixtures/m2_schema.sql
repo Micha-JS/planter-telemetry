@@ -1,7 +1,7 @@
--- M2 schema: plain Postgres tables, applied by the timescale image's
--- /docker-entrypoint-initdb.d on first boot (the compose DB is volume-less, so
--- "first boot" is every `docker compose up`). M3 replaces this with real
--- migrations and converts telemetry into a hypertable.
+-- Frozen copy of the M2 init script (formerly db/init/schema.sql), kept as a
+-- test fixture: it recreates the exact pre-Alembic database that migration
+-- 0001 must be indistinguishable from and that the stamp guard in
+-- planter_telemetry.migrate must detect. Never edit this file.
 
 CREATE TABLE telemetry (
     device_id       text             NOT NULL,
