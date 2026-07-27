@@ -66,7 +66,21 @@ naive timestamps, out-of-range values, a topic/payload `device_id` mismatch —
 becomes a row in `dead_letter` carrying the raw payload bytes (`bytea`:
 truncation can split UTF-8), the topic, a greppable reason, and `received_at`.
 The service never crashes on message content and never silently drops input.
-M4 puts a panel on this table.
+The M4 dashboard puts panels on this table.
+
+Since M4, deduplicated redeliveries leave a trace too: each absorbed
+duplicate (rowcount 0 from `ON CONFLICT DO NOTHING`) writes one row to
+`ingest_events` (`event = 'deduplicated'`, the reading's `device_id` and
+`measured_at`, wall-clock `occurred_at`) — the dashboard's dedupe panel
+reads it, because "silently absorbed" should still be observable. Like
+`dead_letter`, this is a log of *arrivals*, not pipeline state: replaying a
+stream twice leaves telemetry, the registry, and the rollups unchanged (the
+idempotency invariant) while appending dedupe events, since each replayed
+message genuinely was deduplicated. One edge case is accepted as honest: if
+the database connection dies after a reading's insert succeeds but before
+the success is observed, the retry's conflict records a dedupe event for
+what was really a first delivery — the conflict path did fire, and the
+count stays an arrivals metric, not a state metric.
 
 ## Write strategy
 

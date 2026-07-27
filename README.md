@@ -11,7 +11,7 @@ itself — dedupes, dead-letters, out-of-order arrivals, missed check-ins), and
 **replay/time-travel** (re-run any historical window at speed, safe because ingestion
 is idempotent).
 
-**Status: M3 — storage layer.** See
+**Status: M4 — dashboard.** See
 [planter-telemetry-plan.md](planter-telemetry-plan.md) for the full milestone plan.
 
 ## Architecture
@@ -19,15 +19,16 @@ is idempotent).
 ```
 ESP32 sensor pod (optional real hardware)  ─┐
                                             ├─► MQTT broker ─► Ingestion service ─► TimescaleDB ─► Grafana
-Device simulator (default demo mode)       ─┘   (Mosquitto)    (typed Python)       (Postgres)     (planned, M4)
+Device simulator (default demo mode)       ─┘   (Mosquitto)    (typed Python)       (Postgres)     (provisioned)
 ```
 
 Everything runs via `docker compose up`, with a device simulator as the default
 data source — real hardware is an optional backend, never a requirement.
 
-## Quickstart (what works today)
+## Quickstart
 
-Start the broker, the device simulator, the ingestion service, and TimescaleDB:
+Start the broker, the device simulator, the ingestion service, TimescaleDB,
+and Grafana:
 
 ```bash
 docker compose up -d --build
@@ -69,6 +70,21 @@ docker compose exec timescaledb psql -U planter -d planter \
   -c "SELECT device_id, bucket, round(water_avg::numeric,1) AS water_avg, sample_count
       FROM telemetry_hourly ORDER BY bucket DESC, device_id LIMIT 8"
 ```
+
+Then open the dashboard — no login, no setup, no clicking "add datasource":
+
+**<http://localhost:3000>**
+
+![Planter Fleet dashboard](docs/img/dashboard.png)
+
+Within ~2 minutes of `up` the charts are visibly moving: the simulator's
+clock runs 180× ahead of the wall clock, so every wall-minute adds three
+virtual hours of per-planter water/battery history — plus the
+meta-observability row, where the pipeline shows off what it survived
+(dead-lettered garbage, absorbed duplicates, out-of-order arrivals, missed
+check-ins). The default time range reaches into the *future* (`now → now+2d`)
+for the same reason; details in
+[docs/dashboard-queries.md](docs/dashboard-queries.md).
 
 If you have mosquitto clients installed on your host,
 `mosquitto_sub -h localhost -t 'planter/v1/+/telemetry' -v` works the same way
@@ -143,6 +159,38 @@ raw SQL, sequentially numbered, run automatically by a one-shot `migrate`
 service before ingestion starts, and proven in CI from an empty database.
 Design, rationale, and pasteable analytical queries:
 [docs/storage.md](docs/storage.md).
+
+## Dashboard
+
+Everything Grafana is provisioned as code — a reviewer never clicks "add
+datasource" or "import dashboard", and Grafana's internal state is
+deliberately ephemeral (no volume): `down`/`up` reproduces the identical
+instance from these files alone.
+
+| File | What it provisions |
+|---|---|
+| [`grafana/provisioning/datasources/timescaledb.yml`](grafana/provisioning/datasources/timescaledb.yml) | the TimescaleDB datasource (uid `planter-timescaledb`), connecting as the read-only `grafana_reader` role that migration `0007` creates |
+| [`grafana/provisioning/dashboards/planter.yml`](grafana/provisioning/dashboards/planter.yml) | the file provider that loads every dashboard JSON from `grafana/dashboards/` (UI edits and deletion disabled — the repo is the source of truth) |
+| [`grafana/dashboards/planter-fleet.json`](grafana/dashboards/planter-fleet.json) | the "Planter Fleet" dashboard: per-planter water/battery (raw + M3 hourly rollup), last-check-in staleness with green/amber/red thresholds, and the pipeline meta-observability row |
+
+Anonymous viewer access is enabled (it's a local demo bound to loopback);
+editing requires the `admin` user. Every panel query is documented and
+test-enforced in [docs/dashboard-queries.md](docs/dashboard-queries.md), and
+`tests/test_dashboard.py` lints the JSON structurally (datasource references
+by provisioned uid, no `${DS_*}` import variables, demo-tuned time range).
+The compose healthcheck marks Grafana healthy only once it can run the
+datasource health check — an actual `SELECT 1` against TimescaleDB as
+`grafana_reader` — and CI's `make grafana-smoke` asserts the provisioned
+datasource and dashboard exist and that a real panel query returns rows.
+
+Configuration via environment variables (read by `docker-compose.yml`; the
+`GRAFANA_DB_*` pair is interpolated by Grafana into the datasource yaml):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GRAFANA_ADMIN_PASSWORD` | `planter` | password of the `admin` user (host env var, dev-only default) |
+| `GRAFANA_DB_USER` | `grafana_reader` | database role the datasource connects as |
+| `GRAFANA_DB_PASSWORD` | `grafana_reader` | its password (dev-only, created by migration `0007`) |
 
 ## Development
 
