@@ -1,4 +1,11 @@
-.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke
+.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke replay-smoke
+
+# What ingesting samples/telemetry-window.jsonl must produce, pinned in
+# src/planter_telemetry/cli/sample.py and verified by tests/test_sample.py:
+# 200 messages = 185 unique valid rows + 13 duplicates + 2 dead letters.
+SAMPLE_ROWS = 185
+SAMPLE_VALID_MSGS = 198
+SAMPLE_WINDOW = measured_at >= '2026-01-01' AND measured_at < '2026-02-01'
 
 lint:
 	uv run ruff format --check .
@@ -127,4 +134,73 @@ grafana-smoke:
 			exit 1; \
 		fi; \
 	done
+	docker compose down
+
+# The M5 done-criteria, asserted rather than claimed:
+#   1. every long-running service reports healthy (migrate is one-shot and
+#      gated by service_completed_successfully instead);
+#   2. the committed sample window replayed through MQTT lands end-to-end
+#      (the CLI runs inside the ingestion container, sample piped via stdin
+#      — no curl/wget/image additions), visible through grafana;
+#   3. replaying the SAME file again leaves the telemetry checksum
+#      untouched. ingest_events is an arrival log and grows by design, so
+#      it serves only as the progress signal for the second pass.
+# The sample's Jan-2026 window is disjoint from live simulator data, so the
+# windowed queries are unambiguous even on a persisted volume — and because
+# replay is idempotent, this whole target is safely rerunnable.
+replay-smoke:
+	docker compose up -d --build
+	for svc in mosquitto timescaledb ingestion simulator grafana; do \
+		for i in $$(seq 1 60); do \
+			status=$$(docker inspect -f '{{.State.Health.Status}}' \
+				$$(docker compose ps -q $$svc)); \
+			[ "$$status" = "healthy" ] && break; \
+			sleep 2; \
+			if [ $$i -eq 60 ]; then \
+				echo "$$svc never became healthy (status=$$status)" >&2; \
+				docker compose logs $$svc >&2; exit 1; \
+			fi; \
+		done; \
+	done
+	docker compose exec -T ingestion uv run --no-sync planter-telemetry replay \
+		--host mosquitto --no-delay - < samples/telemetry-window.jsonl
+	for i in $$(seq 1 60); do \
+		count=$$(docker compose exec -T timescaledb psql -U planter -d planter \
+			-tAc "SELECT count(*) FROM telemetry WHERE $(SAMPLE_WINDOW)"); \
+		[ "$$count" -eq $(SAMPLE_ROWS) ] && break; \
+		sleep 1; \
+		if [ $$i -eq 60 ]; then \
+			echo "replayed window incomplete: $$count of $(SAMPLE_ROWS) rows" >&2; \
+			exit 1; \
+		fi; \
+	done
+	checksum1=$$(docker compose exec -T timescaledb psql -U planter -d planter \
+		-tAc "SELECT md5(string_agg(device_id||'|'||measured_at||'|'||water_level||'|'||battery_voltage, ',' ORDER BY device_id, measured_at)) FROM telemetry WHERE $(SAMPLE_WINDOW)"); \
+	dedupe1=$$(docker compose exec -T timescaledb psql -U planter -d planter \
+		-tAc "SELECT count(*) FROM ingest_events WHERE event = 'deduplicated' AND $(SAMPLE_WINDOW)"); \
+	docker compose exec -T ingestion uv run --no-sync planter-telemetry replay \
+		--host mosquitto --no-delay - < samples/telemetry-window.jsonl; \
+	for i in $$(seq 1 60); do \
+		dedupe2=$$(docker compose exec -T timescaledb psql -U planter -d planter \
+			-tAc "SELECT count(*) FROM ingest_events WHERE event = 'deduplicated' AND $(SAMPLE_WINDOW)"); \
+		[ "$$dedupe2" -ge $$((dedupe1 + $(SAMPLE_VALID_MSGS))) ] && break; \
+		sleep 1; \
+		if [ $$i -eq 60 ]; then \
+			echo "second replay not fully processed ($$dedupe2 dedupe events, want >= $$((dedupe1 + $(SAMPLE_VALID_MSGS))))" >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	checksum2=$$(docker compose exec -T timescaledb psql -U planter -d planter \
+		-tAc "SELECT md5(string_agg(device_id||'|'||measured_at||'|'||water_level||'|'||battery_voltage, ',' ORDER BY device_id, measured_at)) FROM telemetry WHERE $(SAMPLE_WINDOW)"); \
+	[ -n "$$checksum1" ] && [ "$$checksum1" = "$$checksum2" ] || { \
+		echo "replaying the same window twice changed telemetry: $$checksum1 != $$checksum2" >&2; \
+		exit 1; }
+	count=$$(docker compose exec -T grafana sh -ec 'wget -q -O - \
+		--header "Content-Type: application/json" \
+		--post-data "{\"queries\":[{\"refId\":\"A\",\"datasource\":{\"uid\":\"planter-timescaledb\"},\"format\":\"table\",\"rawSql\":\"SELECT count(*) FROM telemetry WHERE measured_at >= '"'"'2026-01-01'"'"' AND measured_at < '"'"'2026-02-01'"'"'\"}]}" \
+		http://127.0.0.1:3000/api/ds/query' \
+		| sed -n 's/.*"values":\[\[\([0-9]*\).*/\1/p'); \
+	[ -n "$$count" ] && [ "$$count" -eq $(SAMPLE_ROWS) ] || { \
+		echo "replayed window not visible through grafana (count=$${count:-unparsed})" >&2; \
+		exit 1; }
 	docker compose down

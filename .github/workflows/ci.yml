@@ -54,6 +54,9 @@ jobs:
       - name: Grafana serves the provisioned dashboard over live data
         run: make grafana-smoke
 
+      - name: All services healthy; sample replay is idempotent end-to-end
+        run: make replay-smoke
+
       - name: Second up against the persisted volume (migrate is a no-op)
         # ingest-smoke left the named volume behind, so this exercises the
         # existing-database migration path, not just migrate-from-empty.
