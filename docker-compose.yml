@@ -69,6 +69,17 @@ services:
       INGEST_MQTT_HOST: mosquitto
       INGEST_DB_DSN: postgresql://planter:planter@timescaledb:5432/planter
       # All INGEST_* knobs are documented in the README's Ingestion section.
+    healthcheck:
+      # The image ships no curl/wget; the system python's stdlib is enough
+      # (urlopen raises on any non-2xx, so a 503 exits nonzero). Healthy
+      # means "subscribed to the broker AND writing to the database" — the
+      # service's own /healthz semantics, not merely a live process.
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 6          # ~30 s of consecutive failure → unhealthy; rides out one max-backoff reconnect
+      start_period: 20s   # image start + broker/DB connect + first subscribe
 
   simulator:
     build: .
@@ -80,6 +91,19 @@ services:
       SIM_MQTT_HOST: mosquitto
       # All SIM_* knobs (device count, seed, acceleration, imperfection
       # rates) are documented in the README's Simulator section.
+    healthcheck:
+      # The simulator has no HTTP surface; it touches a heartbeat file after
+      # each publish that was accepted while connected, so freshness proves
+      # broker reachability (house rule: prove the dependency, not the
+      # process). 30 s tolerates the default ~0.4 s publish cadence with
+      # room to spare — raise it if SIM_INTERVAL_SECONDS/SIM_ACCELERATION
+      # are tuned toward sparser publishing (see simulator/config.py).
+      test: ["CMD", "python", "-c",
+             "import os,sys,time; sys.exit(0 if time.time() - os.path.getmtime('/tmp/planter-simulator-heartbeat') < 30 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   grafana:
     image: grafana/grafana:12.3.0

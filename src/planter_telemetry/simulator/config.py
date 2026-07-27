@@ -1,5 +1,7 @@
 """Simulator configuration from SIM_-prefixed environment variables."""
 
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -22,3 +24,8 @@ class SimulatorSettings(BaseSettings):
     out_of_order_rate: float = Field(default=0.03, ge=0, le=1)
     malformed_rate: float = Field(default=0.02, ge=0, le=1)
     missed_checkin_rate: float = Field(default=0.03, ge=0, le=1)
+    # Touched after each accepted publish; the compose healthcheck asserts
+    # freshness (< 30 s), which proves broker reachability, not just a live
+    # process. If interval_seconds/acceleration are tuned so publishes are
+    # more than ~30 s apart, the compose threshold needs raising too.
+    heartbeat_path: Path = Path("/tmp/planter-simulator-heartbeat")

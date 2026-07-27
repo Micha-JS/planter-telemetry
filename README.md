@@ -125,6 +125,7 @@ Configuration via environment variables (set them on the `simulator` service in
 | `SIM_OUT_OF_ORDER_RATE` | `0.03` | chance per wake-up of a reading being delivered 1–3 wake-ups late |
 | `SIM_MALFORMED_RATE` | `0.02` | chance per wake-up of a corrupted payload (rotating: truncated JSON, wrong types, missing fields) |
 | `SIM_MISSED_CHECKIN_RATE` | `0.03` | chance per wake-up of the device skipping a check-in entirely |
+| `SIM_HEARTBEAT_PATH` | `/tmp/planter-simulator-heartbeat` | file touched after each accepted publish; the compose healthcheck asserts it is fresh |
 
 ## Ingestion
 

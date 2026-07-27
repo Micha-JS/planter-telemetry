@@ -28,9 +28,9 @@ def connect_with_retry(
 ) -> mqtt.Client:
     """Connect to the broker, retrying while it starts up.
 
-    Mirrors the repo's imperative-readiness style (compose has no
-    healthchecks yet). After the initial connect, paho's network loop
-    handles reconnects on broker restarts.
+    Compose healthchecks gate the first start; this retry loop covers
+    host-side runs without compose and broker restarts mid-startup. After
+    the initial connect, paho's network loop handles reconnects.
     """
     client = mqtt.Client(CallbackAPIVersion.VERSION2)
     # Default is unbounded; during a long broker outage the simulator keeps
@@ -80,6 +80,28 @@ def run(settings: SimulatorSettings) -> None:
         },
     )
     client = connect_with_retry(settings)
+    heartbeat_warned = False
+
+    def beat() -> None:
+        """Freshness signal for the compose healthcheck (see config.py).
+
+        Only called while demonstrably connected, so a dead broker stales
+        the file. An unwritable path logs once and never kills publishing.
+        """
+        nonlocal heartbeat_warned
+        try:
+            settings.heartbeat_path.touch()
+        except OSError as exc:
+            if not heartbeat_warned:
+                heartbeat_warned = True
+                logger.warning(
+                    "heartbeat_failed",
+                    extra={"path": str(settings.heartbeat_path), "error": str(exc)},
+                )
+
+    # Once immediately: the healthcheck can pass before the first emission
+    # is due on a sparse stream.
+    beat()
     anchor = datetime.now(UTC)
     wall_start = time.monotonic()
     try:
@@ -103,6 +125,8 @@ def run(settings: SimulatorSettings) -> None:
                     extra={"topic": topic, "error": mqtt.error_string(result.rc)},
                 )
                 continue
+            if client.is_connected():
+                beat()
             logger.info(
                 "publish",
                 extra={
