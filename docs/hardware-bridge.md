@@ -129,10 +129,19 @@ make hardware-passwd DEVICE=planter-a4cf12
 This validates the id against the `device_id` pattern, runs
 `mosquitto_passwd` inside the `eclipse-mosquitto:2` image against the
 mounted `mosquitto/auth/` directory (so file ownership and permissions come
-out broker-readable on every platform), prompts for a password, and — if the
-stack is running — SIGHUPs the broker so the new credentials take effect
-immediately. SIGHUP re-reads `password_file` and `acl_file`; it does not
-disconnect already-connected clients.
+out broker-readable on every platform), prompts for a password, and — if a
+broker is already running *in hardware mode* — SIGHUPs it so the new
+credentials take effect immediately. SIGHUP re-reads `password_file` and
+`acl_file`; it does not disconnect already-connected clients.
+
+The reload is reported honestly, because "credential created" and "credential
+live" are different states: with nothing running you get *"broker not running
+— credentials take effect on next hardware-up"*, and with the **demo** stack
+running you get *"broker is running in DEMO mode"* — that broker uses
+`mosquitto.conf`, which has no `password_file` and no 1884 listener, so the
+credential does nothing until `make hardware-up`. A failed password prompt
+(mistyped confirmation, empty password, Ctrl-C) fails the target and leaves
+no half-made passwd file behind.
 
 `mosquitto/auth/passwd` is gitignored and must never be committed. The ACL
 file next to it is committed — it contains a pattern, not secrets.
@@ -250,7 +259,7 @@ dead-letter table as the firmware's error log.
 | On the wire, but no row **and** no dead letter | Duplicate key — a row with that `(device_id, measured_at)` already exists | Working as designed; check the firmware clock actually advances between wakes |
 | Row exists but panels look empty | Dashboard time range vs `measured_at` | Widen the Grafana time range; check the pod's clock isn't in the past/future |
 | `mosquitto/auth/passwd` is a *directory* | A hand-rolled single-file bind mount ran before the file existed — docker created a directory | Delete it; always create users via `make hardware-passwd` |
-| Broker exits immediately at startup | Missing passwd file, or an edited config placed auth options before `per_listener_settings` | `make hardware-up` preflights the passwd file; keep `per_listener_settings true` the first directive |
+| Broker exits immediately at startup | Missing passwd file, or an edited config placed auth options before `per_listener_settings` | `make hardware-up` preflights for a missing *or empty* passwd file; keep `per_listener_settings true` the first directive |
 
 ## TODO ledger
 
