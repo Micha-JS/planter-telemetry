@@ -111,7 +111,10 @@ async def start_ops_server(
     app[_REGISTRY_KEY] = build_registry(counters)
     app.router.add_get("/healthz", _healthz)
     app.router.add_get("/metrics", _metrics)
-    runner = web.AppRunner(app)
+    # access_log=None: the compose healthcheck probes every 5 s, and access
+    # lines through the JSON formatter would flood stderr with non-constant
+    # "event" values — breaking the event-name-plus-extra log convention.
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()

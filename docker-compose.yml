@@ -74,8 +74,13 @@ services:
       # (urlopen raises on any non-2xx, so a 503 exits nonzero). Healthy
       # means "subscribed to the broker AND writing to the database" — the
       # service's own /healthz semantics, not merely a live process.
+      # The port comes from INGEST_OPS_PORT so overriding the knob doesn't
+      # orphan the check (fallback must match config.py's default; note
+      # INGEST_OPS_PORT=0 is a test-only knob — an ephemeral port can't be
+      # healthchecked). 127.0.0.1 covers both the loopback default and an
+      # INGEST_OPS_HOST=0.0.0.0 override.
       test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+             "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('INGEST_OPS_PORT', '8080'), timeout=3)"]
       interval: 5s
       timeout: 5s
       retries: 6          # ~30 s of consecutive failure → unhealthy; rides out one max-backoff reconnect
@@ -98,8 +103,11 @@ services:
       # process). 30 s tolerates the default ~0.4 s publish cadence with
       # room to spare — raise it if SIM_INTERVAL_SECONDS/SIM_ACCELERATION
       # are tuned toward sparser publishing (see simulator/config.py).
+      # The path comes from SIM_HEARTBEAT_PATH so overriding the knob doesn't
+      # orphan the check (fallback must match config.py's default); a missing
+      # file raises, which exits nonzero — unhealthy, as it should be.
       test: ["CMD", "python", "-c",
-             "import os,sys,time; sys.exit(0 if time.time() - os.path.getmtime('/tmp/planter-simulator-heartbeat') < 30 else 1)"]
+             "import os, sys, time; p = os.environ.get('SIM_HEARTBEAT_PATH', '/tmp/planter-simulator-heartbeat'); sys.exit(0 if time.time() - os.path.getmtime(p) < 30 else 1)"]
       interval: 10s
       timeout: 5s
       retries: 3

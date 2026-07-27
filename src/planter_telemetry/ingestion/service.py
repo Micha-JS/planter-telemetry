@@ -197,57 +197,73 @@ async def run(
         while not stop.is_set():
             writer: Writer | None = None
             try:
-                writer = await Writer.connect(settings.db_dsn)
-                health.db_connected = True
-                async with aiomqtt.Client(
-                    settings.mqtt_host,
-                    settings.mqtt_port,
-                    identifier=settings.client_id,
-                    clean_session=False,  # MQTT 3.1.1 persistent session
-                ) as client:
-                    # With a persistent session the broker remembers this
-                    # subscription, but re-subscribing is idempotent and also
-                    # covers a fresh or expired session.
-                    await client.subscribe(TELEMETRY_TOPIC_FILTER, qos=1)
-                    health.broker_connected = True
-                    logger.info(
-                        "consuming",
-                        extra={
-                            "topic_filter": TELEMETRY_TOPIC_FILTER,
-                            "host": settings.mqtt_host,
-                            "port": settings.mqtt_port,
-                            "client_id": settings.client_id,
-                        },
-                    )
-                    backoff = settings.reconnect_initial_seconds
-                    messages = client.messages
-                    try:
-                        while pending and not stop.is_set():
-                            await _handle_one(pending[0], writer, counters, latest)
-                            pending.popleft()
-                        while not stop.is_set():
-                            message = await _next_message(messages, stop)
-                            if message is None:
-                                break
-                            item = (message.topic.value, message.payload)
-                            pending.append(item)
-                            await _handle_one(item, writer, counters, latest)
-                            pending.popleft()
-                        # Stop requested: everything left in aiomqtt's queue
-                        # is already acked — write it out before the client
-                        # context (and the queue with it) is torn down.
-                        while len(messages) > 0:
-                            message = await anext(messages)
-                            item = (message.topic.value, message.payload)
-                            pending.append(item)
-                            await _handle_one(item, writer, counters, latest)
-                            pending.popleft()
-                    except psycopg.OperationalError:
-                        # DB gone, but this client — and its queue of acked
-                        # messages — is still alive: salvage into `pending`
-                        # before the context manager discards the queue.
-                        await _salvage_queue(messages, pending)
-                        raise
+                try:
+                    writer = await Writer.connect(settings.db_dsn)
+                    health.db_connected = True
+                    async with aiomqtt.Client(
+                        settings.mqtt_host,
+                        settings.mqtt_port,
+                        identifier=settings.client_id,
+                        clean_session=False,  # MQTT 3.1.1 persistent session
+                    ) as client:
+                        # With a persistent session the broker remembers this
+                        # subscription, but re-subscribing is idempotent and
+                        # also covers a fresh or expired session.
+                        await client.subscribe(TELEMETRY_TOPIC_FILTER, qos=1)
+                        health.broker_connected = True
+                        logger.info(
+                            "consuming",
+                            extra={
+                                "topic_filter": TELEMETRY_TOPIC_FILTER,
+                                "host": settings.mqtt_host,
+                                "port": settings.mqtt_port,
+                                "client_id": settings.client_id,
+                            },
+                        )
+                        backoff = settings.reconnect_initial_seconds
+                        messages = client.messages
+                        try:
+                            while pending and not stop.is_set():
+                                await _handle_one(pending[0], writer, counters, latest)
+                                pending.popleft()
+                            while not stop.is_set():
+                                message = await _next_message(messages, stop)
+                                if message is None:
+                                    break
+                                item = (message.topic.value, message.payload)
+                                pending.append(item)
+                                await _handle_one(item, writer, counters, latest)
+                                pending.popleft()
+                            # Stop requested: everything left in aiomqtt's
+                            # queue is already acked — write it out before the
+                            # client context (and the queue with it) is torn
+                            # down.
+                            while len(messages) > 0:
+                                message = await anext(messages)
+                                item = (message.topic.value, message.payload)
+                                pending.append(item)
+                                await _handle_one(item, writer, counters, latest)
+                                pending.popleft()
+                        except psycopg.OperationalError:
+                            # DB gone, but this client — and its queue of
+                            # acked messages — is still alive: salvage into
+                            # `pending` before the context manager discards
+                            # the queue.
+                            await _salvage_queue(messages, pending)
+                            raise
+                finally:
+                    # Both flags drop together: one reconnect path, no
+                    # half-alive states. This inner finally runs during
+                    # unwinding, BEFORE the reconnect handler's backoff wait,
+                    # so /healthz reports 503 for the whole reconnect gap (and
+                    # a dead writer is not held open across it). A clean stop
+                    # also lands here, which is accurate — the service is no
+                    # longer consuming.
+                    health.broker_connected = False
+                    health.db_connected = False
+                    if writer is not None:
+                        with suppress(Exception):
+                            await writer.close()
             except (aiomqtt.MqttError, psycopg.OperationalError) as exc:
                 if stop.is_set():
                     break  # shutting down; the final flush below owns `pending`
@@ -261,15 +277,6 @@ async def run(
                 )
                 await _wait_for_stop(stop, backoff)
                 backoff = min(backoff * 2, settings.reconnect_max_seconds)
-            finally:
-                # Both flags drop together: one reconnect path, no half-alive
-                # states (a clean stop also lands here, which is accurate —
-                # the service is no longer consuming).
-                health.broker_connected = False
-                health.db_connected = False
-                if writer is not None:
-                    with suppress(Exception):
-                        await writer.close()
         if pending:
             # Last chance for acked-but-unwritten messages (the DB was down
             # when stop arrived): one bounded flush attempt, then loud loss —

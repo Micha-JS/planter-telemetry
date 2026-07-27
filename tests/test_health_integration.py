@@ -9,6 +9,7 @@ resets share the reconnect path proven in test_ingestion_integration.
 """
 
 import asyncio
+import logging
 import socket
 import time
 from collections.abc import AsyncIterator, Callable
@@ -43,14 +44,18 @@ async def _wait_until(predicate: Callable[[], bool], description: str) -> None:
 
 @asynccontextmanager
 async def _service_with_ops(
-    mqtt_host: str, mqtt_port: int, dsn: str, client_id: str
+    mqtt_host: str,
+    mqtt_port: int,
+    dsn: str,
+    client_id: str,
+    reconnect_initial_seconds: float = 0.1,
 ) -> AsyncIterator[tuple[HealthState, Counters, asyncio.Task[None]]]:
     settings = IngestSettings(
         mqtt_host=mqtt_host,
         mqtt_port=mqtt_port,
         client_id=client_id,
         db_dsn=dsn,
-        reconnect_initial_seconds=0.1,
+        reconnect_initial_seconds=reconnect_initial_seconds,
         ops_port=0,  # ephemeral; the bound port comes back via HealthState
     )
     health = HealthState()
@@ -75,9 +80,13 @@ async def _get_json(port: int, path: str) -> tuple[int, dict[str, object]]:
 
 
 async def test_healthy_reports_200_and_metrics_serve(
-    mqtt_endpoint: tuple[str, int], db_dsn: str
+    mqtt_endpoint: tuple[str, int], db_dsn: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     host, port = mqtt_endpoint
+    # The ops server must not access-log: a compose healthcheck probes every
+    # 5 s, and each line would carry a formatted request string as its
+    # "event" — flooding stderr and breaking the constant-event convention.
+    caplog.set_level(logging.INFO, logger="aiohttp.access")
     async with _service_with_ops(host, port, db_dsn, "it-health-ok") as (health, _counters, task):
         assert health.ops_port is not None
 
@@ -109,11 +118,17 @@ async def test_healthy_reports_200_and_metrics_serve(
         # Platform basics; process_* metrics additionally appear on Linux
         # (the ProcessCollector reads /proc), i.e. inside the container.
         assert "python_info" in text
+        assert not [r for r in caplog.records if r.name == "aiohttp.access"]
         assert not task.done()
 
 
 async def test_broker_down_is_503(db_dsn: str) -> None:
-    async with _service_with_ops("127.0.0.1", _dead_port(), db_dsn, "it-health-nobroker") as (
+    # reconnect_initial_seconds=30: after the first failed attempt the
+    # service sits in its backoff wait, so the assertions below sample the
+    # backoff window deterministically.
+    async with _service_with_ops(
+        "127.0.0.1", _dead_port(), db_dsn, "it-health-nobroker", reconnect_initial_seconds=30
+    ) as (
         health,
         _counters,
         task,
@@ -123,6 +138,16 @@ async def test_broker_down_is_503(db_dsn: str) -> None:
         assert status == 503
         assert body["status"] == "unhealthy"
         assert body["broker_connected"] is False
+        # The first attempt did connect to the database before the broker
+        # connect failed. One second in, the service is inside the 30 s
+        # backoff — BOTH flags must already be down: /healthz reporting a
+        # live DB connection (or worse, 200) during the backoff would let
+        # the compose healthcheck ride out an outage as "healthy".
+        await asyncio.sleep(1)
+        status, body = await _get_json(health.ops_port, "/healthz")
+        assert status == 503
+        assert body["broker_connected"] is False
+        assert body["db_connected"] is False
         assert not task.done()  # still retrying, not dead
 
 
