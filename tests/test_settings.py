@@ -1,8 +1,9 @@
-"""SimulatorSettings: defaults, env overrides, bounds."""
+"""Settings classes: defaults, env overrides, bounds."""
 
 import pytest
 from pydantic import ValidationError
 
+from planter_telemetry.ingestion.config import IngestSettings
 from planter_telemetry.simulator.config import SimulatorSettings
 
 
@@ -49,3 +50,24 @@ def test_out_of_range_rejected(monkeypatch: pytest.MonkeyPatch, name: str, value
     monkeypatch.setenv(name, value)
     with pytest.raises(ValidationError):
         SimulatorSettings()
+
+
+def test_ingest_ops_defaults() -> None:
+    settings = IngestSettings()
+    assert settings.ops_host == "127.0.0.1"
+    assert settings.ops_port == 8080
+
+
+def test_ingest_ops_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INGEST_OPS_HOST", "0.0.0.0")
+    monkeypatch.setenv("INGEST_OPS_PORT", "0")  # 0 = ephemeral, explicitly allowed
+    settings = IngestSettings()
+    assert settings.ops_host == "0.0.0.0"
+    assert settings.ops_port == 0
+
+
+@pytest.mark.parametrize("value", ["70000", "-1"])
+def test_ingest_ops_port_out_of_range_rejected(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("INGEST_OPS_PORT", value)
+    with pytest.raises(ValidationError):
+        IngestSettings()

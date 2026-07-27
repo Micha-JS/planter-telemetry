@@ -49,7 +49,7 @@ async def _ingest(dsn: str, emissions: list[Emission]) -> Counters:
     try:
         for emission in emissions:
             item = (telemetry_topic(emission.reading.device_id), encode(emission.reading))
-            await _handle_one(item, writer, counters)
+            await _handle_one(item, writer, counters, {})
     finally:
         await writer.close()
     return counters
@@ -126,7 +126,7 @@ async def test_malformed_messages_never_touch_the_registry(clean_db: str) -> Non
     writer = await Writer.connect(clean_db)
     counters = Counters()
     try:
-        await _handle_one((telemetry_topic("planter-bad"), b"not json"), writer, counters)
+        await _handle_one((telemetry_topic("planter-bad"), b"not json"), writer, counters, {})
     finally:
         await writer.close()
 

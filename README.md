@@ -148,7 +148,9 @@ Configuration via environment variables (set them on the `ingestion` service in
 | `INGEST_DB_DSN` | `postgresql://planter:planter@localhost:5433/planter` | TimescaleDB connection string (default matches the compose stack's host port) |
 | `INGEST_RECONNECT_INITIAL_SECONDS` | `1` | first reconnect delay after broker/DB loss |
 | `INGEST_RECONNECT_MAX_SECONDS` | `30` | reconnect backoff cap |
-| `INGEST_STATS_INTERVAL_SECONDS` | `30` | cadence of the `ingested/deduplicated/dead_lettered` stats log line |
+| `INGEST_STATS_INTERVAL_SECONDS` | `30` | cadence of the `stats` counter log event |
+| `INGEST_OPS_HOST` | `127.0.0.1` | bind address for `/healthz` + `/metrics` (loopback: the compose healthcheck runs in-container) |
+| `INGEST_OPS_PORT` | `8080` | port for `/healthz` + `/metrics`; `0` binds an ephemeral port (used by tests) |
 
 ## Storage
 
