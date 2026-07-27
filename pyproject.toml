@@ -17,6 +17,9 @@ dependencies = [
     "sqlalchemy>=2.0",
 ]
 
+[project.scripts]
+planter-telemetry = "planter_telemetry.cli.app:main"
+
 [dependency-groups]
 dev = [
     "mypy>=1.16",

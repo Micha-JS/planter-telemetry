@@ -1,4 +1,4 @@
-.PHONY: lint typecheck test integration up down down-clean migrate smoke sim-smoke ingest-smoke grafana-smoke
+.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke
 
 lint:
 	uv run ruff format --check .
@@ -29,6 +29,11 @@ down-clean:
 # the migrate service; this target is for ad-hoc use against port 5433).
 migrate:
 	uv run python -m planter_telemetry.migrate
+
+# Regenerate the committed sample capture (deterministic; tests/test_sample.py
+# asserts the committed file matches this output byte-for-byte).
+sample:
+	uv run planter-telemetry sample --out samples/telemetry-window.jsonl
 
 # End-to-end broker check: wait until the broker accepts connections, then do a
 # pub/sub round-trip through it. Uses the clients bundled in the image.
