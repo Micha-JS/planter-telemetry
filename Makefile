@@ -87,9 +87,11 @@ ingest-smoke:
 # check (SELECT 1 against TimescaleDB as grafana_reader), so "healthy" already
 # proves migrate created the role and the provisioned datasource connects.
 # Then: the dashboard loads anonymously by uid, the datasource exists by uid
-# (admin API), and a real query through grafana's /api/ds/query returns data
-# frames. All HTTP runs inside the grafana container via busybox wget — no
-# host dependencies.
+# (admin API), and a real query through grafana's /api/ds/query returns a
+# NONZERO telemetry count — an empty database also produces data frames, so
+# the assertion must see actual rows (polled, since on a fresh stack the
+# first readings may still be landing). All HTTP runs inside the grafana
+# container via busybox wget — no host dependencies.
 grafana-smoke:
 	docker compose up -d --build
 	for i in $$(seq 1 60); do \
@@ -107,9 +109,17 @@ grafana-smoke:
 	docker compose exec -T grafana sh -ec 'wget -q -O - \
 		"http://admin:$$GF_SECURITY_ADMIN_PASSWORD@127.0.0.1:3000/api/datasources/uid/planter-timescaledb" \
 		| grep -q "\"uid\":\"planter-timescaledb\""'
-	docker compose exec -T grafana sh -ec 'wget -q -O - \
-		--header "Content-Type: application/json" \
-		--post-data "{\"queries\":[{\"refId\":\"A\",\"datasource\":{\"uid\":\"planter-timescaledb\"},\"format\":\"table\",\"rawSql\":\"SELECT count(*) FROM telemetry\"}]}" \
-		http://127.0.0.1:3000/api/ds/query \
-		| grep -q "\"frames\""'
+	for i in $$(seq 1 30); do \
+		count=$$(docker compose exec -T grafana sh -ec 'wget -q -O - \
+			--header "Content-Type: application/json" \
+			--post-data "{\"queries\":[{\"refId\":\"A\",\"datasource\":{\"uid\":\"planter-timescaledb\"},\"format\":\"table\",\"rawSql\":\"SELECT count(*) FROM telemetry\"}]}" \
+			http://127.0.0.1:3000/api/ds/query' \
+			| sed -n 's/.*"values":\[\[\([0-9]*\).*/\1/p'); \
+		[ -n "$$count" ] && [ "$$count" -gt 0 ] && break; \
+		sleep 2; \
+		if [ $$i -eq 30 ]; then \
+			echo "no telemetry rows visible through grafana (count=$${count:-unparsed})" >&2; \
+			exit 1; \
+		fi; \
+	done
 	docker compose down

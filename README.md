@@ -82,7 +82,7 @@ clock runs 180× ahead of the wall clock, so every wall-minute adds three
 virtual hours of per-planter water/battery history — plus the
 meta-observability row, where the pipeline shows off what it survived
 (dead-lettered garbage, absorbed duplicates, out-of-order arrivals, missed
-check-ins). The default time range reaches into the *future* (`now → now+2d`)
+check-ins). The default time range reaches into the *future* (`now → now+7d`)
 for the same reason; details in
 [docs/dashboard-queries.md](docs/dashboard-queries.md).
 
@@ -181,7 +181,8 @@ by provisioned uid, no `${DS_*}` import variables, demo-tuned time range).
 The compose healthcheck marks Grafana healthy only once it can run the
 datasource health check — an actual `SELECT 1` against TimescaleDB as
 `grafana_reader` — and CI's `make grafana-smoke` asserts the provisioned
-datasource and dashboard exist and that a real panel query returns rows.
+datasource and dashboard exist and that a query through Grafana sees a
+nonzero telemetry count.
 
 Configuration via environment variables (read by `docker-compose.yml`; the
 `GRAFANA_DB_*` pair is interpolated by Grafana into the datasource yaml):

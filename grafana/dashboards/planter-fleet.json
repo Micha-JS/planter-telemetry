@@ -460,7 +460,7 @@
         "type": "postgres",
         "uid": "planter-timescaledb"
       },
-      "description": "Arrival rate over the last 15 wall-clock minutes (~0.05/min expected at the simulator's default 2% malformed rate).",
+      "description": "Arrival rate over the last 15 wall-clock minutes (~3.5/min expected at the simulator's defaults: ~2.9 msg/s fleet-wide x 2% malformed). The denominator clamps to stream uptime so the first minutes aren't understated.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -515,7 +515,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT round(count(*) / 15.0, 2) AS per_minute FROM dead_letter WHERE received_at > now() - INTERVAL '15 minutes'",
+          "rawSql": "SELECT round(count(*) * 60.0 / GREATEST(EXTRACT(EPOCH FROM (now() - GREATEST((SELECT min(received_at) FROM telemetry), now() - INTERVAL '15 minutes'))), 60.0), 2) AS per_minute FROM dead_letter WHERE received_at > now() - INTERVAL '15 minutes'",
           "refId": "A"
         }
       ],
@@ -828,7 +828,7 @@
   },
   "time": {
     "from": "now-1h",
-    "to": "now+2d"
+    "to": "now+7d"
   },
   "timepicker": {},
   "timezone": "utc",

@@ -52,8 +52,12 @@ def test_dashboard_identity_and_demo_ergonomics() -> None:
     assert isinstance(dashboard["schemaVersion"], int)
     # The simulator's clock runs 180x ahead of the wall clock from wall-now:
     # the range must reach into the future or the dashboard shows nothing,
-    # and 5s refresh = 15 virtual minutes = 3 new points per device.
-    assert dashboard["time"] == {"from": "now-1h", "to": "now+2d"}
+    # and 5s refresh = 15 virtual minutes = 3 new points per device. The
+    # right edge must also outrun the data: `now+X` advances at 1x while
+    # measured_at advances at 180x, so the live edge leaves the window after
+    # X/179 of wall time — 7d keeps it in-window for ~56 wall-minutes, a
+    # full demo session (2d would freeze the panels after ~16).
+    assert dashboard["time"] == {"from": "now-1h", "to": "now+7d"}
     assert dashboard["refresh"] == "5s"
     # Device timestamps must not be shifted by the viewer's browser locale.
     assert dashboard["timezone"] == "utc"

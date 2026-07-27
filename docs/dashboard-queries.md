@@ -14,9 +14,12 @@ and `occurred_at` on `ingest_events` are wall-clock arrival times. Two
 consequences:
 
 - The dashboard's time axis is device time — the default range is
-  `now-1h → now+2d` (into the future, deliberately), and staleness is
+  `now-1h → now+7d` (into the future, deliberately), and staleness is
   measured against the fleet-wide `max(measured_at)` ("virtual now"), never
-  against wall `now()`.
+  against wall `now()`. The generous right edge is load-bearing: `now+X`
+  advances at wall speed while the data advances 180× faster, so the live
+  edge leaves the window after X/179 of wall time — 7 days keeps it
+  in-window for ~56 wall-minutes, a full demo session.
 - The meta-observability stat panels do the opposite: they ignore the
   dashboard time range entirely, because filtering wall-clock arrival
   columns by a virtual-time range would silently mix the two clocks. Totals
@@ -114,14 +117,22 @@ SELECT count(*) AS dead_lettered FROM dead_letter
 ### Dead-letter rate / min
 
 ```sql
-SELECT round(count(*) / 15.0, 2) AS per_minute
+SELECT round(count(*) * 60.0 / GREATEST(EXTRACT(EPOCH FROM (now() -
+           GREATEST((SELECT min(received_at) FROM telemetry),
+                    now() - INTERVAL '15 minutes'))), 60.0), 2) AS per_minute
 FROM dead_letter
 WHERE received_at > now() - INTERVAL '15 minutes'
 ```
 
 Explicit wall-clock window (see above). At the simulator defaults
-(~2.9 messages/s fleet-wide, 2% malformed) expect a small but nonzero
-number.
+(~2.9 messages/s fleet-wide, 2% malformed) expect ~3.5/min. The
+denominator is the window's *covered* wall time, not a flat 15 minutes:
+clamping the window start to the stream's first arrival
+(`min(received_at)` on `telemetry`) keeps the rate honest during the
+first 15 minutes of a fresh stack — exactly the advertised demo window —
+and the 60-second floor avoids divide-by-near-zero right at startup.
+(`GREATEST` ignores NULLs, so an empty `telemetry` falls back to the
+plain 15-minute window.)
 
 ### Deduplicated (total)
 
