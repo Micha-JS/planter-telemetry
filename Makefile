@@ -243,7 +243,10 @@ hardware-passwd:
 		echo "DEVICE must match ^[a-z0-9][a-z0-9_-]{0,31}$$ (username == device_id)" >&2; \
 		exit 1; }
 	docker run --rm -it -v "$(CURDIR)/mosquitto/auth":/mosquitto/auth eclipse-mosquitto:2 \
-		sh -ec 'touch /mosquitto/auth/passwd && mosquitto_passwd /mosquitto/auth/passwd $(DEVICE)'
+		sh -ec 'touch /mosquitto/auth/passwd \
+			&& mosquitto_passwd /mosquitto/auth/passwd $(DEVICE) \
+			&& chown mosquitto:mosquitto /mosquitto/auth/passwd 2>/dev/null; \
+			chmod 0700 /mosquitto/auth/passwd'
 	@$(HW_COMPOSE) kill -s SIGHUP mosquitto 2>/dev/null \
 		&& echo "broker reloaded (SIGHUP)" \
 		|| echo "broker not running — credentials take effect on next hardware-up"
@@ -272,7 +275,9 @@ hardware-config-check:
 	cid=""; \
 	trap 'docker rm -f $$cid >/dev/null 2>&1 || true; rm -rf "$$tmp"' EXIT; \
 	docker run --rm -v "$$tmp":/auth eclipse-mosquitto:2 \
-		sh -ec 'mosquitto_passwd -c -b /auth/passwd ci-device ci-password && chmod 644 /auth/passwd'; \
+		sh -ec 'mosquitto_passwd -c -b /auth/passwd ci-device ci-password; \
+			chown mosquitto:mosquitto /auth/passwd 2>/dev/null; \
+			chmod 0700 /auth/passwd'; \
 	cid=$$(docker run -d \
 		-v "$(CURDIR)/mosquitto/mosquitto.hardware.conf":/mosquitto/config/mosquitto.conf:ro \
 		-v "$(CURDIR)/mosquitto/auth/acl.conf":/mosquitto/auth/acl.conf:ro \

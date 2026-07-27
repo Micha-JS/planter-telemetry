@@ -13,9 +13,9 @@ is idempotent).
 
 ![The committed sample window replayed through the broker while the dashboard fills](docs/img/demo.gif)
 
-*Left of the split: the sample window replayed at `--speed 100` while
-`mosquitto_sub` shows it crossing the broker. Below: the provisioned dashboard
-filling in, timelapsed from screenshots taken during that same replay.*
+*Top: the committed sample window replayed at `--speed 100`, with
+`mosquitto_sub` showing it cross the broker. Bottom: the provisioned dashboard
+filling in — a timelapse of screenshots taken during that same replay.*
 
 **Status: M6 — real-hardware bridge + docs.** See
 [planter-telemetry-plan.md](planter-telemetry-plan.md) for the full milestone plan.
@@ -95,12 +95,17 @@ for the same reason; details in
 [docs/dashboard-queries.md](docs/dashboard-queries.md).
 
 Finally, replay the committed sample window through the broker — the same
-path live traffic takes, at 100× speed:
+path live traffic takes, as fast as the broker will accept it:
 
 ```bash
 docker compose exec -T ingestion uv run --no-sync planter-telemetry replay \
-  --host mosquitto --speed 100 - < samples/telemetry-window.jsonl
+  --host mosquitto --no-delay - < samples/telemetry-window.jsonl
 ```
+
+That finishes in about a second and adds 185 readings dated January 2026
+(view them at `from=2026-01-01&to=2026-01-02`). Swap `--no-delay` for
+`--speed 100` to watch it arrive paced instead, as in the GIF above — that
+takes about three minutes of wall clock for the window's 5.3 virtual hours.
 
 Run it a second time and nothing changes: readings are keyed by
 `(device_id, measured_at)` and written with `ON CONFLICT DO NOTHING`, so
@@ -114,13 +119,25 @@ against port 1883, and `psql` reaches the database on `localhost:5433`
 persists in a named volume across restarts; `make down-clean` also removes it,
 so the next `up` starts from an empty, freshly migrated database.
 
-**Timings**, measured on an M-series Mac with a warm Docker install: a cold
-run (no images pulled, no build cache — `make down-clean`, then
-`docker image rm eclipse-mosquitto:2 timescale/timescaledb:2.28.3-pg17
-grafana/grafana:12.3.0` and `docker builder prune -f`) takes about TBD_COLD
-from `docker compose up -d --build` to a populated dashboard, most of it
-image pulls; a warm run takes about TBD_WARM. Slower on a slower connection —
-the pull is ~TBD_SIZE.
+**Timings**, measured on an Apple M1 with a fast connection, from a genuinely
+cold state — fresh clone, no images, no build cache:
+
+| | Cold | Warm |
+|---|---|---|
+| `docker compose up -d --build` returns | 72 s | 9 s |
+| all five services healthy | 80 s | — |
+| dashboard showing live readings | **89 s** | **20 s** |
+
+Cold means the ~2.8 GB of images (TimescaleDB, Grafana, Mosquitto, plus the
+Python base) were pulled during that 72 s, so a slower connection moves this
+number and little else. To reproduce the cold state:
+
+```bash
+docker compose down -v --rmi local        # or: make down-clean, to keep the images
+docker image rm eclipse-mosquitto:2 timescale/timescaledb:2.28.3-pg17 \
+  grafana/grafana:12.3.0 python:3.12-slim ghcr.io/astral-sh/uv:0.11.14
+docker builder prune -f
+```
 
 The wire format, topic tree, versioning policy, and idempotency key are documented
 in [docs/message-contract.md](docs/message-contract.md).

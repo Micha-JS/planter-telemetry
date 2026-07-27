@@ -175,8 +175,8 @@ Run these in order; each step isolates one layer.
    identical from the couch:
    - *Connection refused (`not authorised`)* — the device user doesn't exist
      in the passwd file, the password is wrong, or the broker was never
-     SIGHUPed after `make hardware-passwd`. The firmware's MQTT client will
-     see CONNACK code 5.
+     SIGHUPed after `make hardware-passwd`. The firmware's MQTT client sees
+     a CONNACK refusal: code 5 on MQTT 3.1.1, code 135 on MQTT 5.
    - *Connected but silently dropped* — the ACL. The topic being published
      doesn't match `planter/v1/<username>/telemetry` (typo'd topic, or
      username ≠ `device_id`). The broker acknowledges and discards; only the
@@ -191,13 +191,18 @@ Run these in order; each step isolates one layer.
       FROM dead_letter ORDER BY received_at DESC LIMIT 10"
    ```
 
-   The `reason` tells you which firmware bug to fix:
-   - `topic does not match planter/v1/{device_id}/telemetry` — topic shape.
-   - `invalid payload: <field>: <problem>; …` — JSON that doesn't satisfy
-     the schema table above (unparseable JSON reads `invalid json`; a naive
-     timestamp complains about timezone; an out-of-range float names the
-     bound it violated).
-   - `device_id mismatch: topic='…' payload='…'` — the two ids disagree.
+   The `reason` tells you which firmware bug to fix — these are the real
+   strings, straight from the pipeline:
+
+   | Reason | What the firmware did |
+   |---|---|
+   | `invalid payload: payload: Invalid JSON: EOF while parsing a string at line 1 column 25` | Truncated publish — buffer too small, or the payload length was miscounted |
+   | `invalid payload: measured_at: Input should have timezone info` | Naive timestamp; append `Z` (or a real offset) |
+   | `invalid payload: water_level: Input should be less than or equal to 100` | Sent raw sensor counts instead of percent |
+   | `device_id mismatch: topic='planter-01' payload='planter-00'` | Topic segment and payload id disagree |
+   | `topic does not match planter/v1/{device_id}/telemetry` | Wrong topic shape entirely |
+
+   Up to three validation errors are listed per message, `;`-separated.
 
 4. **Confirm the row:**
 
