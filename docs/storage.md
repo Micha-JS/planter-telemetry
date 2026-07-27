@@ -45,7 +45,14 @@ where possible:
   `uv run alembic revision --rev-id NNNN -m "slug"`.
 - **Never edited after merge.** A wrong migration is fixed by the next one.
 - **Forward-only past 0003.** Hypertable conversion is one-way short of a
-  table rebuild; downgrade raises rather than pretending.
+  table rebuild (and disabling the columnstore refuses to run once chunks
+  are compressed); downgrade raises rather than pretending.
+- **Non-transactional revisions are re-runnable.** Continuous-aggregate and
+  policy DDL must run in an autocommit block, where each statement commits
+  while `alembic_version` still points at the previous revision — so a
+  migrate container killed partway must be able to re-run the revision on
+  the next `up`. Every such statement is guarded (`IF NOT EXISTS` /
+  `if_not_exists => true`).
 
 The compose stack runs a one-shot `migrate` service before ingestion starts;
 CI's testcontainers fixture runs the identical code path
@@ -135,7 +142,9 @@ SELECT add_retention_policy('telemetry', drop_after => INTERVAL '1 year');
 ## Device registry
 
 `devices` is maintained by ingestion with a single upsert per valid reading
-(including deduplicated redeliveries — `last_seen` must advance on replay):
+(unconditionally — it is idempotent, it guarantees the device row exists
+before its reading, and a redelivery's identical `measured_at` makes it a
+no-op on the registry):
 
 ```sql
 INSERT INTO devices (device_id, first_seen, last_seen)
@@ -192,12 +201,16 @@ ORDER BY day, device_id;
 
 Check-in health from the hourly rollup — hours where a device delivered
 fewer readings than its deep-sleep cadence predicts (12/hour at the
-5-virtual-minute default); the seed of M4's missed-check-in panel:
+5-virtual-minute default); the seed of M4's missed-check-in panel. The
+newest bucket is excluded: it is still filling, so it always undercounts —
+and the cutoff comes from the device timeline (`max(measured_at)`), not the
+wall clock, because demo data is future-stamped:
 
 ```sql
 SELECT device_id, bucket, sample_count
 FROM telemetry_hourly
 WHERE sample_count < 12
+  AND bucket < time_bucket(INTERVAL '1 hour', (SELECT max(measured_at) FROM telemetry))
 ORDER BY bucket DESC, device_id
 LIMIT 20;
 ```
@@ -221,6 +234,9 @@ CI-verified against a real TimescaleDB (testcontainers, `make integration`):
   policies, columnstore enabled, no retention job, the M2 unique
   constraint intact);
 - migrating twice is a no-op;
+- a migrate run killed partway through the non-transactional 0004 (view
+  already created, version row still at 0003) recovers: the next run
+  reaches head with the full end state;
 - a database at `0001` is column-for-column, constraint-for-constraint
   identical to one built by the M2 init script;
 - a pre-Alembic M2 database with existing rows is stamped and upgraded, its

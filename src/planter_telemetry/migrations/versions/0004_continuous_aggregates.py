@@ -18,8 +18,14 @@ exact form costs nothing.
 
 Both CREATE MATERIALIZED VIEW ... WITH (timescaledb.continuous) and the
 policy CALLs refuse to run inside a transaction, hence the autocommit
-block; it is the only thing in this migration so a mid-migration failure
-cannot strand unrelated committed DDL.
+block. That block commits each statement individually while alembic_version
+still says 0003, so a migrate container killed partway leaves some of these
+objects behind — and this migration re-runs on the next `up`. Every
+statement is therefore guarded (IF NOT EXISTS / if_not_exists) to make the
+whole revision safely re-runnable.
+
+Downgrade is deliberately not implemented: the chain is forward-only past
+0003 (see 0003's docstring).
 
 Revision ID: 0004
 Revises: 0003
@@ -33,7 +39,7 @@ branch_labels = None
 depends_on = None
 
 _ROLLUP = """
-CREATE MATERIALIZED VIEW {name}
+CREATE MATERIALIZED VIEW IF NOT EXISTS {name}
 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT
     device_id,
@@ -61,7 +67,8 @@ def upgrade() -> None:
             SELECT add_continuous_aggregate_policy('telemetry_hourly',
                 start_offset      => INTERVAL '6 hours',
                 end_offset        => INTERVAL '1 hour',
-                schedule_interval => INTERVAL '15 minutes')
+                schedule_interval => INTERVAL '15 minutes',
+                if_not_exists     => true)
             """
         )
         op.execute(
@@ -69,12 +76,11 @@ def upgrade() -> None:
             SELECT add_continuous_aggregate_policy('telemetry_daily',
                 start_offset      => INTERVAL '3 days',
                 end_offset        => INTERVAL '1 day',
-                schedule_interval => INTERVAL '1 hour')
+                schedule_interval => INTERVAL '1 hour',
+                if_not_exists     => true)
             """
         )
 
 
 def downgrade() -> None:
-    with op.get_context().autocommit_block():
-        op.execute("DROP MATERIALIZED VIEW telemetry_daily")
-        op.execute("DROP MATERIALIZED VIEW telemetry_hourly")
+    raise NotImplementedError("the schema is forward-only past 0003; restore from backup instead")

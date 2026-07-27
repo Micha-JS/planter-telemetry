@@ -72,9 +72,10 @@ M4 puts a panel on this table.
 
 Since M3, every valid reading also upserts the device registry
 (`devices.first_seen`/`last_seen`, `LEAST`/`GREATEST` so ordering never
-matters) before the reading insert — deliberately also on redeliveries, so
-`last_seen` advances even when the reading itself deduplicates. Rationale in
-[docs/storage.md](storage.md).
+matters) before the reading insert. The upsert is unconditional because it
+is idempotent and guarantees the device row exists before its reading; a
+pure redelivery carries the same `measured_at` and so changes nothing.
+Rationale in [docs/storage.md](storage.md).
 
 Row-at-a-time, on purpose. The default simulator produces ~2–4 messages/second
 (4 devices, 300 virtual-second cadence at 180× acceleration); a single INSERT

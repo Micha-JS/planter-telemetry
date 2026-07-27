@@ -22,7 +22,14 @@ deployment would add e.g.
     SELECT add_retention_policy('telemetry', drop_after => INTERVAL '1 year');
 
 add_columnstore_policy is a procedure (CALL): autocommit block, which is
-the only thing in this migration.
+the only thing in this migration. Statements in that block commit
+individually while alembic_version still says 0004, so a killed migrate
+container re-runs this revision on the next `up` — the ALTER is naturally
+idempotent and the policy takes if_not_exists, making the re-run safe.
+
+Downgrade is deliberately not implemented: the chain is forward-only past
+0003 (see 0003's docstring) — and once a chunk actually sits in the
+columnstore, `enable_columnstore = false` refuses to run anyway.
 
 Revision ID: 0005
 Revises: 0004
@@ -47,10 +54,11 @@ def upgrade() -> None:
             )
             """
         )
-        op.execute("CALL add_columnstore_policy('telemetry', after => INTERVAL '7 days')")
+        op.execute(
+            "CALL add_columnstore_policy('telemetry',"
+            " after => INTERVAL '7 days', if_not_exists => true)"
+        )
 
 
 def downgrade() -> None:
-    with op.get_context().autocommit_block():
-        op.execute("CALL remove_columnstore_policy('telemetry')")
-        op.execute("ALTER TABLE telemetry SET (timescaledb.enable_columnstore = false)")
+    raise NotImplementedError("the schema is forward-only past 0003; restore from backup instead")

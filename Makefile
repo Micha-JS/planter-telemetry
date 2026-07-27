@@ -61,17 +61,24 @@ sim-smoke:
 		grep -q "schema_version" /tmp/sim'
 	docker compose down
 
-# Full-pipeline check: simulator → broker → ingestion → TimescaleDB. Rows must
-# land in the telemetry table and the ingestion container must still be
-# running afterwards (it never crashes on the simulator's injected garbage).
+# Full-pipeline check: simulator → broker → ingestion → TimescaleDB. The row
+# count must GROW past a baseline taken right after startup — the persisted
+# volume may already hold rows from an earlier run (e.g. sim-smoke), and a
+# mere count > 0 would pass on that stale data without proving this run's
+# ingestion works. The baseline query needs no retry: `up -d` only returns
+# once ingestion has started, which implies migrate completed against a
+# healthy database. The ingestion container must also still be running
+# afterwards (it never crashes on the simulator's injected garbage).
 ingest-smoke:
 	docker compose up -d --build
+	baseline=$$(docker compose exec -T timescaledb \
+		psql -U planter -d planter -tAc "SELECT count(*) FROM telemetry"); \
 	for i in $$(seq 1 60); do \
 		count=$$(docker compose exec -T timescaledb \
 			psql -U planter -d planter -tAc "SELECT count(*) FROM telemetry" 2>/dev/null) \
-			&& [ "$$count" -gt 0 ] && break; \
+			&& [ "$$count" -gt "$$baseline" ] && break; \
 		sleep 1; \
-		if [ $$i -eq 60 ]; then echo "no telemetry rows after 60s" >&2; exit 1; fi; \
+		if [ $$i -eq 60 ]; then echo "no new telemetry rows after 60s" >&2; exit 1; fi; \
 	done
 	docker compose ps --status running --format '{{.Service}}' | grep -qx ingestion
 	docker compose down

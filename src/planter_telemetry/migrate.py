@@ -13,7 +13,9 @@ from importlib.resources import files
 import psycopg
 from alembic import command
 from alembic.config import Config
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import TupleRow
+from sqlalchemy.engine import URL
 
 from planter_telemetry.ingestion.config import IngestSettings
 
@@ -24,10 +26,29 @@ BASELINE_REVISION = "0001"
 
 def sqlalchemy_url(dsn: str) -> str:
     """Rewrite a libpq DSN for SQLAlchemy: plain postgresql:// would select
-    the absent psycopg2 driver instead of psycopg 3."""
-    return "postgresql+psycopg://" + dsn.removeprefix("postgresql+psycopg://").removeprefix(
-        "postgresql://"
+    the absent psycopg2 driver instead of psycopg 3.
+
+    Parses through psycopg's own conninfo machinery so every DSN form that
+    `psycopg.connect` accepts elsewhere in this codebase (postgresql://,
+    postgres://, key=value) works here too, and a malformed DSN fails with
+    libpq's parse error rather than an opaque SQLAlchemy one.
+    """
+    if dsn.startswith("postgresql+psycopg://"):
+        return dsn
+    params = {key: str(value) for key, value in conninfo_to_dict(dsn).items()}
+    port = params.pop("port", None)
+    url = URL.create(
+        "postgresql+psycopg",
+        username=params.pop("user", None),
+        password=params.pop("password", None),
+        host=params.pop("host", None),
+        port=int(port) if port else None,
+        database=params.pop("dbname", None),
+        # Everything else (sslmode, connect_timeout, ...) rides along as
+        # query parameters, which the psycopg dialect hands back to libpq.
+        query=params,
     )
+    return url.render_as_string(hide_password=False)
 
 
 def build_config(dsn: str) -> Config:

@@ -134,6 +134,40 @@ def test_upgrade_twice_is_a_noop(db_dsn: str) -> None:
     assert _rows(dsn, _DESCRIBE_TABLES) == before_schema
 
 
+def test_interrupted_0004_recovers_on_rerun(db_dsn: str) -> None:
+    """0004 runs in an autocommit block, so a migrate container killed after
+    the first CREATE leaves telemetry_hourly behind with alembic_version
+    still at 0003 — and every `docker compose up` re-runs migrate against
+    that state. The re-run must reach head, not die on 'already exists'."""
+    dsn = _fresh_db(db_dsn, "crashed_mid_0004")
+    config = migrate.build_config(dsn)
+    command.upgrade(config, "0003")
+
+    # Reproduce the crash state with 0004's own first statement, pulled from
+    # the loaded migration module so this can never drift from the real DDL.
+    rollup_template = ScriptDirectory.from_config(config).get_revision("0004").module._ROLLUP
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(rollup_template.format(name="telemetry_hourly", bucket="1 hour"))
+
+    migrate.upgrade(dsn)
+
+    assert _rows(dsn, "SELECT version_num FROM alembic_version") == [(_head_revision(),)]
+    assert _rows(
+        dsn,
+        "SELECT view_name FROM timescaledb_information.continuous_aggregates ORDER BY view_name",
+    ) == [("telemetry_daily",), ("telemetry_hourly",)]
+    assert _rows(
+        dsn,
+        "SELECT count(*) FROM timescaledb_information.jobs"
+        " WHERE proc_name = 'policy_refresh_continuous_aggregate'",
+    ) == [(2,)]
+    assert _rows(
+        dsn,
+        "SELECT count(*) FROM timescaledb_information.jobs"
+        " WHERE proc_name = 'policy_compression' AND hypertable_name = 'telemetry'",
+    ) == [(1,)]
+
+
 def test_baseline_reproduces_m2_schema_exactly(db_dsn: str) -> None:
     """A database at revision 0001 is indistinguishable from an M2 init-script
     database — the invariant the stamp guard depends on."""

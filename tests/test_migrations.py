@@ -33,3 +33,20 @@ def test_sqlalchemy_url_selects_psycopg3() -> None:
     )
     # Already-rewritten URLs pass through unchanged.
     assert sqlalchemy_url("postgresql+psycopg://u@host/db") == "postgresql+psycopg://u@host/db"
+
+
+def test_sqlalchemy_url_accepts_every_libpq_dsn_form() -> None:
+    """Anything psycopg.connect accepts must work here too — the migrate
+    service and the ingestion Writer read the same INGEST_DB_DSN."""
+    # The short scheme libpq also accepts.
+    assert sqlalchemy_url("postgres://u:p@host:5433/db") == "postgresql+psycopg://u:p@host:5433/db"
+    # key=value conninfo form.
+    assert (
+        sqlalchemy_url("host=host port=5433 user=u password=p dbname=db")
+        == "postgresql+psycopg://u:p@host:5433/db"
+    )
+    # Extra libpq parameters survive as query parameters.
+    assert (
+        sqlalchemy_url("postgresql://u@host/db?sslmode=require")
+        == "postgresql+psycopg://u@host/db?sslmode=require"
+    )
