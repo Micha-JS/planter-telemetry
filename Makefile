@@ -1,4 +1,4 @@
-.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke replay-smoke
+.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke replay-smoke hardware-up hardware-down hardware-passwd
 
 # What ingesting samples/telemetry-window.jsonl must produce, pinned in
 # src/planter_telemetry/cli/sample.py and verified by tests/test_sample.py:
@@ -204,3 +204,37 @@ replay-smoke:
 		echo "replayed window not visible through grafana (count=$${count:-unparsed})" >&2; \
 		exit 1; }
 	docker compose down
+
+# --------------------------------------------------------------- hardware mode
+# Opt-in: the demo stack plus an authenticated LAN listener on 1884 for real
+# ESP32 pods. The default demo path never touches these targets or files.
+# See docs/hardware-bridge.md.
+HW_COMPOSE = docker compose -f docker-compose.yml -f docker-compose.hardware.yml
+
+# Preflight the password file so mosquitto fails helpfully, not mysteriously
+# (the broker exits at boot when password_file is missing).
+hardware-up:
+	@test -f mosquitto/auth/passwd || { \
+		echo "mosquitto/auth/passwd missing — create your first device user:" >&2; \
+		echo "  make hardware-passwd DEVICE=<device_id>" >&2; \
+		exit 1; }
+	$(HW_COMPOSE) up -d --build
+
+hardware-down:
+	$(HW_COMPOSE) down
+
+# Create or update one device credential (interactive password prompt), then
+# hot-reload the broker if it is running (SIGHUP re-reads password_file and
+# acl_file). Runs mosquitto_passwd inside the broker image so the file's
+# ownership and permissions come out broker-readable on every platform.
+# The MQTT username must equal the device_id (see docs/message-contract.md).
+hardware-passwd:
+	@test -n "$(DEVICE)" || { echo "usage: make hardware-passwd DEVICE=<device_id>" >&2; exit 1; }
+	@echo "$(DEVICE)" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,31}$$' || { \
+		echo "DEVICE must match ^[a-z0-9][a-z0-9_-]{0,31}$$ (username == device_id)" >&2; \
+		exit 1; }
+	docker run --rm -it -v ./mosquitto/auth:/mosquitto/auth eclipse-mosquitto:2 \
+		sh -ec 'touch /mosquitto/auth/passwd && mosquitto_passwd /mosquitto/auth/passwd $(DEVICE)'
+	@$(HW_COMPOSE) kill -s SIGHUP mosquitto 2>/dev/null \
+		&& echo "broker reloaded (SIGHUP)" \
+		|| echo "broker not running — credentials take effect on next hardware-up"
