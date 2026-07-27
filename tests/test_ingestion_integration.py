@@ -169,6 +169,14 @@ async def test_replay_twice_changes_nothing(mqtt_endpoint: tuple[str, int], clea
     assert counters.ingested == expected
     assert counters.deduplicated == expected
     assert counters.dead_lettered == 0
+    # The idempotency invariant covers pipeline state (telemetry, devices,
+    # rollups) — not the arrival log. Like dead_letter, ingest_events records
+    # what actually came over the wire: the replayed pass genuinely was
+    # deduplicated, one event per message.
+    assert (
+        await _scalar(clean_db, "SELECT count(*) FROM ingest_events WHERE event = 'deduplicated'")
+        == expected
+    )
 
 
 async def test_duplicates_within_stream_are_deduplicated(
@@ -192,6 +200,18 @@ async def test_duplicates_within_stream_are_deduplicated(
     assert counters.ingested == unique
     assert counters.deduplicated == duplicates
     assert counters.dead_lettered == 0
+
+    # Every dedupe left a queryable trace identifying the duplicated reading.
+    async with await psycopg.AsyncConnection.connect(clean_db) as conn:
+        cursor = await conn.execute(
+            "SELECT device_id, measured_at FROM ingest_events"
+            " WHERE event = 'deduplicated' ORDER BY device_id, measured_at"
+        )
+        events = [(str(r[0]), r[1]) for r in await cursor.fetchall()]
+    expected_events = sorted(
+        (e.reading.device_id, e.reading.measured_at) for e in emissions if e.kind == "duplicate"
+    )
+    assert events == expected_events
 
 
 async def test_malformed_messages_dead_letter_without_crashing(

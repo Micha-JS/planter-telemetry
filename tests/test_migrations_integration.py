@@ -73,7 +73,36 @@ def test_migrated_from_empty_matches_expected_schema(db_dsn: str) -> None:
             "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
         )
     }
-    assert {"telemetry", "dead_letter", "devices"} <= tables
+    assert {"telemetry", "dead_letter", "devices", "ingest_events"} <= tables
+
+    # The ingest event log carries the wall-clock index its rate panels need.
+    assert ("ingest_events_occurred_at_idx",) in _rows(
+        db_dsn,
+        "SELECT indexname FROM pg_indexes WHERE tablename = 'ingest_events'",
+    )
+
+    # grafana_reader can read everything the dashboard queries — and only
+    # read. Default privileges cover tables from future migrations.
+    with psycopg.connect(db_dsn) as conn:
+        for relation in (
+            "telemetry",
+            "telemetry_hourly",
+            "devices",
+            "dead_letter",
+            "ingest_events",
+        ):
+            grants = conn.execute(
+                "SELECT has_table_privilege('grafana_reader', %s, 'SELECT'),"
+                " has_table_privilege('grafana_reader', %s, 'INSERT')",
+                (relation, relation),
+            ).fetchone()
+            assert grants == (True, False), relation
+    assert _rows(
+        db_dsn,
+        "SELECT count(*) FROM pg_default_acl a JOIN pg_namespace n ON a.defaclnamespace = n.oid"
+        " WHERE n.nspname = 'public'"
+        " AND array_to_string(a.defaclacl, ',') LIKE '%grafana_reader=r/%'",
+    ) == [(1,)]
 
     # telemetry is a hypertable partitioned on measured_at in 1-day chunks.
     assert _rows(
