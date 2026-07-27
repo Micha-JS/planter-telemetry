@@ -1,4 +1,4 @@
-.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke replay-smoke hardware-up hardware-down hardware-passwd hardware-config-check
+.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke replay-smoke hardware-up hardware-down hardware-passwd hardware-config-check link-check
 
 # What ingesting samples/telemetry-window.jsonl must produce, pinned in
 # src/planter_telemetry/cli/sample.py and verified by tests/test_sample.py:
@@ -13,6 +13,15 @@ lint:
 
 typecheck:
 	uv run mypy
+
+# Docs are deliverables: every relative link and image path in the markdown
+# must resolve. --offline skips http(s) URLs entirely by design, so this can
+# never flake on the network or on someone else's rate limit. The pinned
+# image keeps results reproducible.
+link-check:
+	docker run --rm --init -w /repo -v "$(CURDIR)":/repo lycheeverse/lychee:0.24.2 \
+		--offline --include-fragments --no-progress --root-dir /repo \
+		'./**/*.md'
 
 test:
 	uv run pytest
