@@ -26,12 +26,37 @@ in CI.
              │                           last_seen, metadata jsonb)
              ├──────────► dead_letter   (raw payload + reason)
              └──────────► ingest_events (dedupe trace, M4)
+
+ analytics ──┬──────────► forecasts     (PK device_id, kind, as_of;
+ (M7, reads  │                           + forecasts_latest view)
+  telemetry) └──────────► alert_events  (alert decisions + delivery outcome)
 ```
 
 `telemetry` and `dead_letter` are unchanged from M2; the registry and the
 Timescale machinery are M3. There is deliberately no foreign key from
 `telemetry` to `devices`: it would couple insert ordering to the registry for
 zero payoff — ingestion writes the registry row first in the same handler.
+
+The M7 analytics tables follow the same standards with the same reasoning.
+`forecasts` keys on `(device_id, kind, as_of)` where `as_of` is the
+per-device data-time watermark that fed the fit — the exact analogue of
+telemetry's `(device_id, measured_at)`, so re-running an analytics pass over
+unchanged data writes nothing. The conflict clause updates rather than
+ignores, gated on the status having changed: a device that goes dark keeps
+its watermark, so its `stale` forecast carries the same key as the last
+healthy one and would otherwise be dropped — leaving the dashboard showing a
+frozen "ok" for a planter that stopped reporting. History is otherwise
+append-only (forecast evolution is the dashboard's forecast-vs-actual
+story); `forecasts_latest` (migration 0010) is the view the panels read, one
+primary-key descent per (device, kind) rather than a scan of the whole
+history, with the horizon `NULL` for the statuses that carry no crossing and
+clamped at zero for the ones that do. Deliberately *not* a hypertable: a
+handful of rows per pass read back through the primary key — chunk
+machinery would cost overhead and buy nothing. `alert_events` records alert
+*decisions* (fired/cleared, before delivery is attempted) and doubles as the
+transition rule's durable state. Both migrations (`0008`, `0009`) carry the
+full rationale; the model that writes them is
+[analytics.md](analytics.md).
 
 ## Migrations: Alembic, raw SQL, forward-only
 

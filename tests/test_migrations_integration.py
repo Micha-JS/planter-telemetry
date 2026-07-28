@@ -73,12 +73,37 @@ def test_migrated_from_empty_matches_expected_schema(db_dsn: str) -> None:
             "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
         )
     }
-    assert {"telemetry", "dead_letter", "devices", "ingest_events"} <= tables
+    assert {
+        "telemetry",
+        "dead_letter",
+        "devices",
+        "ingest_events",
+        "forecasts",
+        "alert_events",
+    } <= tables
 
     # The ingest event log carries the wall-clock index its rate panels need.
     assert ("ingest_events_occurred_at_idx",) in _rows(
         db_dsn,
         "SELECT indexname FROM pg_indexes WHERE tablename = 'ingest_events'",
+    )
+
+    # The alert log carries the latest-decision index its transition rule
+    # (and the dashboard) read through.
+    assert ("alert_events_state_idx",) in _rows(
+        db_dsn,
+        "SELECT indexname FROM pg_indexes WHERE tablename = 'alert_events'",
+    )
+
+    # Forecast idempotency is the primary key itself: (device, kind, as_of).
+    assert (
+        "forecasts",
+        "p",
+        "PRIMARY KEY (device_id, kind, as_of)",
+    ) in _rows(
+        db_dsn,
+        "SELECT conrelid::regclass::text, contype, pg_get_constraintdef(oid)"
+        " FROM pg_constraint WHERE conrelid = 'forecasts'::regclass",
     )
 
     # grafana_reader can read everything the dashboard queries — and only
@@ -90,6 +115,9 @@ def test_migrated_from_empty_matches_expected_schema(db_dsn: str) -> None:
             "devices",
             "dead_letter",
             "ingest_events",
+            "forecasts",
+            "forecasts_latest",
+            "alert_events",
         ):
             grants = conn.execute(
                 "SELECT has_table_privilege('grafana_reader', %s, 'SELECT'),"

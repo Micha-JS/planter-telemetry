@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from planter_telemetry.analytics.config import AnalyticsSettings
 from planter_telemetry.ingestion.config import IngestSettings
 from planter_telemetry.simulator.config import SimulatorSettings
 
@@ -76,3 +77,49 @@ def test_ingest_ops_port_out_of_range_rejected(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setenv("INGEST_OPS_PORT", value)
     with pytest.raises(ValidationError):
         IngestSettings()
+
+
+def test_analytics_defaults() -> None:
+    settings = AnalyticsSettings()
+    assert settings.db_dsn == "postgresql://planter:planter@localhost:5433/planter"
+    assert settings.interval_seconds == 30.0
+    assert settings.water_target_pct == 10.0
+    assert settings.battery_target_volts == 3.4
+    assert settings.water_alert_days == 2.0
+    assert settings.battery_alert_days == 3.0
+    assert settings.alert_cooldown_hours == 24.0
+    assert settings.ntfy_url == ""  # notifications OFF by default: safe clone
+    assert settings.ops_host == "127.0.0.1"
+    assert settings.ops_port == 8081
+
+
+def test_analytics_metrics_carry_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """settings.metrics() is the config->core seam: targets and alert
+    horizons land in the Metric constants without the core seeing settings."""
+    monkeypatch.setenv("ANALYTICS_WATER_TARGET_PCT", "25.0")
+    monkeypatch.setenv("ANALYTICS_BATTERY_ALERT_DAYS", "5.0")
+    water, battery = AnalyticsSettings().metrics()
+    assert water.kind == "water"
+    assert water.target == 25.0
+    assert water.alert_horizon_seconds == 2.0 * 86400.0
+    assert battery.kind == "battery"
+    assert battery.target == 3.4
+    assert battery.alert_horizon_seconds == 5.0 * 86400.0
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("ANALYTICS_INTERVAL_SECONDS", "0"),
+        ("ANALYTICS_WATER_TARGET_PCT", "101"),
+        ("ANALYTICS_BATTERY_TARGET_VOLTS", "5.0"),
+        ("ANALYTICS_WATER_ALERT_DAYS", "0"),
+        ("ANALYTICS_OPS_PORT", "70000"),
+    ],
+)
+def test_analytics_out_of_range_rejected(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError):
+        AnalyticsSettings()

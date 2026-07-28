@@ -54,11 +54,16 @@ jobs:
       - name: Grafana serves the provisioned dashboard over live data
         run: make grafana-smoke
 
+      - name: Analytics forecasts live data, fires an alert, re-runs clean
+        # Starts from a clean volume (down -v) so the seeded fleet's rates —
+        # and therefore the guaranteed firing alert — are deterministic.
+        run: make analytics-smoke
+
       - name: All services healthy; sample replay is idempotent end-to-end
         run: make replay-smoke
 
       - name: Second up against the persisted volume (migrate is a no-op)
-        # ingest-smoke left the named volume behind, so this exercises the
+        # replay-smoke left the named volume behind, so this exercises the
         # existing-database migration path, not just migrate-from-empty.
         # `up -d` itself fails if migrate exits nonzero: ingestion depends on
         # migrate with condition service_completed_successfully.

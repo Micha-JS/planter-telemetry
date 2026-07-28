@@ -105,8 +105,9 @@ ORDER BY bucket
 
 ## Pipeline meta-observability row
 
-The empty slot beside the stat tiles is deliberate: M7's "attention needed"
-panel (days-until-empty per planter) lands there.
+The slot beside the stat tiles holds M7's "attention needed" panel — it
+lives in this row's grid but belongs to the [Forecasts row](#forecasts-row)
+below, where its query is documented.
 
 ### Dead-lettered (total)
 
@@ -198,3 +199,109 @@ LIMIT 10
 `payload` is `bytea` — the corruption modes deliberately produce broken
 UTF-8, so the raw bytes are rendered via `encode(..., 'escape')` and
 truncated for display. The full payload stays in the table.
+
+## Forecasts row
+
+The M7 analytics service writes one forecast row per (device, kind,
+device-time watermark); `forecasts_latest` is the newest per (device, kind),
+with the horizon `NULL` whenever the status carries no crossing and
+`greatest(crosses_at - as_of, 0)` when it does — clamped so "already at
+target" reads as 0 days left, never negative, and left NULL so a
+warming-up planter never reads as one that is dry right now. (`greatest`
+alone would not do it: Postgres `GREATEST` *ignores* NULL arguments, so the
+clamp turned every no-crossing row into a confident 0.00.) All three panels
+anchor on device time (`as_of` IS `measured_at`-time), so `$__timeFilter`
+applies where a time axis exists; the model and its honesty rules are in
+[analytics.md](analytics.md).
+
+### Attention needed (days left)
+
+```sql
+SELECT d.device_id,
+       min(f.horizon_seconds) / 86400.0 AS days_left
+FROM devices d
+LEFT JOIN forecasts_latest f
+       ON f.device_id = d.device_id
+      AND f.status IN ('ok', 'at_or_below_target')
+GROUP BY d.device_id
+ORDER BY d.device_id
+```
+
+One tile per device: the soonest horizon across water and battery, in days
+of device time. `LEFT JOIN` from `devices` so a device never vanishes from
+an attention panel just because it has no fit yet — no qualifying forecast
+renders as the panel's `noValue` text, "warming up", which is a status
+(fresh device, or a just-refilled tank rebuilding history), not a gap; the
+detail table shows the exact reason. Thresholds red < 1 day / amber < 3 /
+green are calibrated to the analytics alert horizon
+(`ANALYTICS_WATER_ALERT_DAYS`, default 2) — retune them together, the way
+the check-in panel couples to `SIM_INTERVAL_SECONDS`.
+
+### Forecast vs actual — $planter
+
+The dashboard's first template variable selects the device:
+
+```sql
+SELECT device_id FROM devices ORDER BY device_id
+```
+
+Target A, the forecast horizon over its history (right axis, days):
+
+```sql
+SELECT as_of AS "time",
+       'days until empty' AS metric,
+       greatest(EXTRACT(EPOCH FROM (crosses_at - as_of)), 0)::double precision / 86400.0 AS value
+FROM forecasts
+WHERE device_id = ${planter:sqlstring}
+  AND kind = 'water'
+  AND status IN ('ok', 'at_or_below_target')
+  AND $__timeFilter(as_of)
+ORDER BY 1
+```
+
+Target B, the actual level (left axis, percent):
+
+```sql
+SELECT measured_at AS "time",
+       'water level' AS metric,
+       water_level AS value
+FROM telemetry
+WHERE device_id = ${planter:sqlstring}
+  AND $__timeFilter(measured_at)
+ORDER BY 1
+```
+
+This is the honesty panel: within one depletion segment the horizon falls at
+exactly one day per day of device time (an integration test asserts it), and
+it resets upward at every refill. Because simulated owners refill at 5–25 %
+while the forecast target is 10 %, most planters get watered before the
+horizon reaches zero — the forecast beaten by the owner is the correct
+outcome, not a bug. `${planter:sqlstring}` (not `'$planter'`): Grafana's
+`sqlstring` formatter quotes and escapes the value; the variable is sourced
+from a database query and `grafana_reader` is read-only, but the formatter
+is the actual control. `$__timeFilter(as_of)` is valid here because `as_of`
+is device time — the same clock as the dashboard's axis.
+
+### Forecast detail (latest per device and kind)
+
+```sql
+SELECT f.device_id, f.kind, f.status,
+       round(f.latest_value::numeric, 2) AS latest,
+       round(f.target_value::numeric, 2) AS target,
+       round((f.slope_per_hour * 24.0)::numeric, 3) AS change_per_day,
+       round((f.horizon_seconds / 86400.0)::numeric, 2) AS days_left,
+       f.crosses_at, f.crosses_at_earliest, f.crosses_at_latest,
+       f.fit_points,
+       round((f.fit_span_seconds / 3600.0)::numeric, 1) AS fit_hours,
+       f.as_of
+FROM forecasts_latest f
+ORDER BY f.horizon_seconds NULLS FIRST, f.device_id, f.kind
+```
+
+Statuses are displayed, so `insufficient_points` after a refill reads as an
+answer rather than a hole. `crosses_at_earliest`/`latest` are the
+distribution-free confidence band on the fitted slope (optimistically narrow
+for water — see [analytics.md](analytics.md)). `target` is a column, not a
+panel constant: a historical row stays interpretable if
+`ANALYTICS_WATER_TARGET_PCT` is retuned. `NULLS FIRST` floats the devices
+with no crossing to the top — they are the ones needing a look.

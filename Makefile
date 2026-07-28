@@ -1,4 +1,4 @@
-.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke replay-smoke hardware-up hardware-down hardware-passwd hardware-config-check link-check
+.PHONY: lint typecheck test integration up down down-clean migrate sample smoke sim-smoke ingest-smoke grafana-smoke analytics-smoke replay-smoke hardware-up hardware-down hardware-passwd hardware-config-check link-check
 
 # What ingesting samples/telemetry-window.jsonl must produce, pinned in
 # src/planter_telemetry/cli/sample.py and verified by tests/test_sample.py:
@@ -145,6 +145,67 @@ grafana-smoke:
 	done
 	docker compose down
 
+# The M7 done-criteria, asserted rather than claimed:
+#   1. every long-running service (analytics included) reports healthy;
+#   2. live simulator data produces an OK water forecast — the fit needs 36
+#      points spanning 3 virtual hours, one wall-minute at the default 180x
+#      acceleration, so the poll allows three;
+#   3. an alert decision lands in alert_events: with the default SIM_SEED=42,
+#      planter-00 depletes at ~1.9 pct/h, so even a FULL tank's horizon
+#      ((100-10)/1.9 = 47 h) sits inside the 48 h water alert horizon — a
+#      firing row is guaranteed by the seed, not by luck;
+#   4. idempotency end-to-end: with the simulator stopped (device time
+#      frozen), consecutive analytics passes leave forecasts unchanged.
+# Starts from a clean volume so the seeded fleet (and claim 3) is
+# deterministic regardless of what earlier smoke targets left behind.
+analytics-smoke:
+	docker compose down -v
+	docker compose up -d --build
+	for svc in mosquitto timescaledb ingestion simulator grafana analytics; do \
+		for i in $$(seq 1 60); do \
+			status=$$(docker inspect -f '{{.State.Health.Status}}' \
+				$$(docker compose ps -q $$svc)); \
+			[ "$$status" = "healthy" ] && break; \
+			sleep 2; \
+			if [ $$i -eq 60 ]; then \
+				echo "$$svc never became healthy (status=$$status)" >&2; \
+				docker compose logs $$svc >&2; exit 1; \
+			fi; \
+		done; \
+	done
+	for i in $$(seq 1 90); do \
+		count=$$(docker compose exec -T timescaledb psql -U planter -d planter \
+			-tAc "SELECT count(*) FROM forecasts WHERE kind = 'water' AND status = 'ok'" 2>/dev/null); \
+		[ -n "$$count" ] && [ "$$count" -gt 0 ] && break; \
+		sleep 2; \
+		if [ $$i -eq 90 ]; then \
+			echo "no OK water forecast after 180s" >&2; \
+			docker compose logs analytics >&2; exit 1; \
+		fi; \
+	done
+	for i in $$(seq 1 60); do \
+		fired=$$(docker compose exec -T timescaledb psql -U planter -d planter \
+			-tAc "SELECT count(*) FROM alert_events WHERE state = 'firing'" 2>/dev/null); \
+		[ -n "$$fired" ] && [ "$$fired" -gt 0 ] && break; \
+		sleep 2; \
+		if [ $$i -eq 60 ]; then \
+			echo "no firing alert_events row after 120s" >&2; \
+			docker compose logs analytics >&2; exit 1; \
+		fi; \
+	done
+	docker compose stop simulator
+	sleep 40; \
+	count1=$$(docker compose exec -T timescaledb psql -U planter -d planter \
+		-tAc "SELECT count(*) FROM forecasts"); \
+	sleep 40; \
+	count2=$$(docker compose exec -T timescaledb psql -U planter -d planter \
+		-tAc "SELECT count(*) FROM forecasts"); \
+	[ -n "$$count1" ] && [ "$$count1" = "$$count2" ] || { \
+		echo "passes over frozen data still wrote forecasts: $$count1 != $$count2" >&2; \
+		exit 1; }
+	docker compose ps --status running --format '{{.Service}}' | grep -qx analytics
+	docker compose down
+
 # The M5 done-criteria, asserted rather than claimed:
 #   1. every long-running service reports healthy (migrate is one-shot and
 #      gated by service_completed_successfully instead);
@@ -159,7 +220,7 @@ grafana-smoke:
 # replay is idempotent, this whole target is safely rerunnable.
 replay-smoke:
 	docker compose up -d --build
-	for svc in mosquitto timescaledb ingestion simulator grafana; do \
+	for svc in mosquitto timescaledb ingestion simulator grafana analytics; do \
 		for i in $$(seq 1 60); do \
 			status=$$(docker inspect -f '{{.State.Health.Status}}' \
 				$$(docker compose ps -q $$svc)); \
