@@ -113,6 +113,38 @@ services:
       retries: 3
       start_period: 30s
 
+  analytics:
+    build: .
+    init: true
+    # Same image as the simulator/ingestion (see Dockerfile header).
+    command: ["uv", "run", "--no-sync", "python", "-m", "planter_telemetry.analytics"]
+    depends_on:
+      # No mosquitto: analytics reads the database, never the broker.
+      timescaledb:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      ANALYTICS_DB_DSN: postgresql://planter:planter@timescaledb:5432/planter
+      # Bind beyond loopback inside the container so the healthcheck and any
+      # future scraper can reach it; the port is not published to the host.
+      ANALYTICS_OPS_HOST: 0.0.0.0
+      # All ANALYTICS_* knobs are documented in the README's Analytics
+      # section. ANALYTICS_NTFY_URL stays unset by default on purpose: a
+      # fresh clone must never post to anyone's ntfy topic.
+    healthcheck:
+      # Same shape as ingestion's: stdlib python, port from the env knob so
+      # overriding it doesn't orphan the check (fallback must match
+      # config.py's default). Healthy means "the last analytics pass
+      # succeeded recently" — the service's own /healthz semantics — not
+      # merely a live process.
+      test: ["CMD", "python", "-c",
+             "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('ANALYTICS_OPS_PORT', '8081'), timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 6          # ~30 s of consecutive failure → unhealthy
+      start_period: 20s   # image start + first pass (runs before the first sleep)
+
   grafana:
     image: grafana/grafana:12.3.0
     ports:
