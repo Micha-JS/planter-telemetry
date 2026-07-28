@@ -17,7 +17,7 @@ is idempotent).
 `mosquitto_sub` showing it cross the broker. Bottom: the provisioned dashboard
 filling in — a timelapse of screenshots taken during that same replay.*
 
-**Status: M6 — real-hardware bridge + docs.** See
+**Status: M7 — analytics layer (final planned milestone).** See
 [planter-telemetry-plan.md](planter-telemetry-plan.md) for the full milestone plan.
 
 ## Architecture
@@ -25,7 +25,10 @@ filling in — a timelapse of screenshots taken during that same replay.*
 ```
 ESP32 sensor pod (optional real hardware)  ─┐
                                             ├─► MQTT broker ─► Ingestion service ─► TimescaleDB ─► Grafana
-Device simulator (default demo mode)       ─┘   (Mosquitto)    (typed Python)       (Postgres)     (provisioned)
+Device simulator (default demo mode)       ─┘   (Mosquitto)    (typed Python)       (Postgres)  ▲  (provisioned)
+                                                                                               │
+                                                                          Analytics service ───┘
+                                                                          (refill forecasts, alerts)
 ```
 
 Everything runs via `docker compose up`, with a device simulator as the default
@@ -209,6 +212,50 @@ service before ingestion starts, and proven in CI from an empty database.
 Design, rationale, and pasteable analytical queries:
 [docs/storage.md](docs/storage.md).
 
+## Analytics
+
+The headline feature: the dashboard tells you *when* to water, not that you
+should have. A pure forecasting core splits each planter's history into
+depletion segments at refill events, fits a robust line (Theil–Sen, stdlib
+only — no numpy, deliberately) to the most recent segment, and extrapolates
+to a configurable "effectively empty" level; the same core, with different
+constants, forecasts battery days-until-charge from voltage decay. Forecasts
+land in a `forecasts` table (append-only history, idempotent on the
+per-device data-time watermark) and surface as the dashboard's
+green/amber/red **attention panel**, a forecast-vs-actual panel that shows
+the horizon ticking down in real time, and a detail table.
+
+![Attention needed panel: per-planter days-until-empty with thresholds](docs/img/attention-panel.png)
+
+Honesty is the design center: a fresh device, a short segment, or a
+just-refilled tank yields an explicit no-forecast reason ("warming up" on
+the panel), never an extrapolation from a handful of points — and CI
+verifies predicted empty times against the simulator's *configured*
+depletion rates within derived tolerances. All forecast arithmetic runs in
+data time (`measured_at`), so "days until empty" means days of device time
+under the accelerated demo clock and wall time on real hardware. Model,
+tolerances, and caveats: [docs/analytics.md](docs/analytics.md).
+
+Alerts fire on the **forecast horizon** ("empty in under 2 days"), not on
+raw thresholds — and they fire as recorded decisions in an `alert_events`
+table, with an opt-in [ntfy](https://ntfy.sh) push. Transitions only, with
+hysteresis and a data-time cooldown, so a standing condition never spams.
+
+Configuration (all `ANALYTICS_*` knobs, read by the analytics container):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ANALYTICS_DB_DSN` | `postgresql://planter:planter@localhost:5433/planter` | TimescaleDB connection (compose overrides host/port) |
+| `ANALYTICS_INTERVAL_SECONDS` | `30` | wall-clock pause between analytics passes |
+| `ANALYTICS_WATER_TARGET_PCT` | `10` | "effectively empty" level — wick delivery fails before 0 % |
+| `ANALYTICS_BATTERY_TARGET_VOLTS` | `3.4` | charge-needed level, above the ~3.0 V working cutoff |
+| `ANALYTICS_WATER_ALERT_DAYS` | `2` | fire when days-until-empty drops to this horizon |
+| `ANALYTICS_BATTERY_ALERT_DAYS` | `3` | fire when days-until-charge drops to this horizon |
+| `ANALYTICS_ALERT_COOLDOWN_HOURS` | `24` | data-time floor between repeat notifications for a standing condition |
+| `ANALYTICS_NTFY_URL` | *(empty — disabled)* | ntfy topic URL to POST alerts to; decisions are recorded either way |
+| `ANALYTICS_OPS_HOST` | `127.0.0.1` | bind address for `/healthz` + `/metrics` |
+| `ANALYTICS_OPS_PORT` | `8081` | port for `/healthz` + `/metrics`; `0` binds an ephemeral port (used by tests) |
+
 ## Dashboard
 
 Everything Grafana is provisioned as code — a reviewer never clicks "add
@@ -220,7 +267,7 @@ instance from these files alone.
 |---|---|
 | [`grafana/provisioning/datasources/timescaledb.yml`](grafana/provisioning/datasources/timescaledb.yml) | the TimescaleDB datasource (uid `planter-timescaledb`), connecting as the read-only `grafana_reader` role that migration `0007` creates |
 | [`grafana/provisioning/dashboards/planter.yml`](grafana/provisioning/dashboards/planter.yml) | the file provider that loads every dashboard JSON from `grafana/dashboards/` (UI edits and deletion disabled — the repo is the source of truth) |
-| [`grafana/dashboards/planter-fleet.json`](grafana/dashboards/planter-fleet.json) | the "Planter Fleet" dashboard: per-planter water/battery (raw + M3 hourly rollup), last-check-in staleness with green/amber/red thresholds, and the pipeline meta-observability row |
+| [`grafana/dashboards/planter-fleet.json`](grafana/dashboards/planter-fleet.json) | the "Planter Fleet" dashboard: per-planter water/battery (raw + M3 hourly rollup), last-check-in staleness with green/amber/red thresholds, the pipeline meta-observability row, and the M7 forecast row (attention needed, forecast-vs-actual, forecast detail) |
 
 Anonymous viewer access is enabled (it's a local demo bound to loopback);
 editing requires the `admin` user. Every panel query is documented and
@@ -255,6 +302,7 @@ proves the service's *dependency*, not merely a live process:
 | `timescaledb` | `pg_isready` over TCP (initdb's socket-only phase can't pass early) |
 | `ingestion` | its own `/healthz` returns 200: subscribed to the broker **and** writing to the database |
 | `simulator` | the heartbeat file (`SIM_HEARTBEAT_PATH`) is fresher than 30 s — touched only after a publish accepted while connected |
+| `analytics` | its own `/healthz` returns 200: the last analytics pass succeeded and completed recently |
 | `grafana` | the provisioned datasource health check runs `SELECT 1` against TimescaleDB as `grafana_reader` |
 
 `migrate` is one-shot and shows `Exited (0)` instead; ingestion and Grafana
@@ -262,8 +310,11 @@ gate on it via `service_completed_successfully`.
 
 ### Health and metrics endpoints
 
-The ingestion service serves two endpoints on a side port
-(`INGEST_OPS_HOST:INGEST_OPS_PORT`, container-internal by default):
+The ingestion and analytics services each serve two endpoints on a side port
+(`INGEST_OPS_HOST:INGEST_OPS_PORT` and `ANALYTICS_OPS_HOST:ANALYTICS_OPS_PORT`,
+container-internal by default), through one shared ops server
+(`planter_telemetry/ops.py`) — each service supplies only what health
+*means* for it:
 
 - `GET /healthz` — `200 {"status": "healthy", ...}` when subscribed to the
   broker and writing to the database; `503 unhealthy` otherwise, with both
@@ -278,6 +329,12 @@ The ingestion service serves two endpoints on a side port
   bookkeeping system; the SQL derivations behind the dashboard remain the
   source of truth. Wiring an actual Prometheus server is future work — the
   endpoint is scrape-ready.
+
+For analytics, `/healthz` means "the last pass succeeded and isn't overdue"
+(a service whose passes all fail while its loop spins is unhealthy), and
+`/metrics` serves `planter_analytics_*` counters (passes, forecasts written,
+alerts fired/cleared, notify failures) plus two honest gauges
+(`last_pass_duration_seconds`, `devices_forecast`).
 
 ### Structured logs
 
@@ -350,6 +407,7 @@ must meet: topics, payload schema, credentials, deep-sleep guidance, and a
 - [message-contract.md](docs/message-contract.md) — wire format, topic tree, versioning policy
 - [ingestion.md](docs/ingestion.md) — consumer layering, delivery semantics, failure behavior
 - [storage.md](docs/storage.md) — hypertable, continuous aggregates, migrations
+- [analytics.md](docs/analytics.md) — the forecast model, its derived tolerances, and its honesty rules
 - [dashboard-queries.md](docs/dashboard-queries.md) — every panel's SQL, with rationale
 - [hardware-bridge.md](docs/hardware-bridge.md) — pointing a real ESP32 pod at the stack
 
@@ -370,19 +428,20 @@ make test         # pytest (unit tests)
 make integration  # pytest -m integration: real broker + TimescaleDB via testcontainers
 make sample       # regenerate samples/telemetry-window.jsonl (guarded by tests/test_sample.py)
 make replay-smoke # compose up → all healthy → replay the sample twice → idempotency proven
+make analytics-smoke # clean volume → forecasts from live data → alert fires → re-pass is a no-op
 make link-check   # docs: no dead relative links or anchors (offline)
 make hardware-config-check  # hardware-mode compose merge + broker config boot test
 ```
 
 ## Future work
 
-- **M7 — analytics (next).** Per-planter depletion model over recent
-  depletion segments → a refill-by forecast ("empty in ~4 days"), the same
-  mechanism for battery life, and alerting on the forecast horizon rather
-  than a raw threshold. The point of the whole pipeline: tell you when to
-  water, not that you should have.
 - **Anomaly detection.** Leak, wick-failure, and sensor-fault baselines on
-  top of the same per-device history.
+  top of the same per-device history — new consumers of the segments the
+  M7 forecaster already computes.
+- **A better depletion model.** The linear-per-segment fit is deliberate
+  (see [docs/analytics.md](docs/analytics.md)); a LiPo voltage-to-charge
+  curve or temperature-aware uptake model slots into one function without
+  touching segmentation, gating, or the tests' structure.
 - **Closed-loop auto-watering** — the "write path" companion to this repo's
   read path: acting on a forecast instead of reporting it. Deliberately out
   of scope here; it belongs in its own project with its own safety story.

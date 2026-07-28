@@ -26,12 +26,31 @@ in CI.
              │                           last_seen, metadata jsonb)
              ├──────────► dead_letter   (raw payload + reason)
              └──────────► ingest_events (dedupe trace, M4)
+
+ analytics ──┬──────────► forecasts     (PK device_id, kind, as_of;
+ (M7, reads  │                           + forecasts_latest view)
+  telemetry) └──────────► alert_events  (alert decisions + delivery outcome)
 ```
 
 `telemetry` and `dead_letter` are unchanged from M2; the registry and the
 Timescale machinery are M3. There is deliberately no foreign key from
 `telemetry` to `devices`: it would couple insert ordering to the registry for
 zero payoff — ingestion writes the registry row first in the same handler.
+
+The M7 analytics tables follow the same standards with the same reasoning.
+`forecasts` keys on `(device_id, kind, as_of)` where `as_of` is the
+per-device data-time watermark that fed the fit — the exact analogue of
+telemetry's `(device_id, measured_at)`, so re-running an analytics pass over
+unchanged data inserts nothing. History is append-only (forecast evolution
+is the dashboard's forecast-vs-actual story); `forecasts_latest` is the
+`DISTINCT ON` view the panels read, deriving the horizon as
+`greatest(crosses_at − as_of, 0)`. Deliberately *not* a hypertable: a
+handful of rows per pass read back via a backwards primary-key scan — chunk
+machinery would cost overhead and buy nothing. `alert_events` records alert
+*decisions* (fired/cleared, before delivery is attempted) and doubles as the
+transition rule's durable state. Both migrations (`0008`, `0009`) carry the
+full rationale; the model that writes them is
+[analytics.md](analytics.md).
 
 ## Migrations: Alembic, raw SQL, forward-only
 

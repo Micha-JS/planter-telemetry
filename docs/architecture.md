@@ -15,6 +15,8 @@ flowchart LR
 
     telemetry[("telemetry<br/><i>hypertable + rollups</i>")]
     dead[("dead_letter<br/><i>raw payload + reason</i>")]
+    analytics["<b>Analytics</b><br/>segment → fit → forecast<br/>alert on horizon"]
+    forecasts[("forecasts<br/><i>+ alert_events</i>")]
     grafana["<b>Grafana</b><br/><i>provisioned as code</i>"]
 
     sim -->|"QoS 1"| broker
@@ -23,8 +25,12 @@ flowchart LR
     broker -->|"planter/v1/+/telemetry"| ingest
     ingest -->|"valid: ON CONFLICT DO NOTHING"| telemetry
     ingest -->|"malformed"| dead
+    telemetry --> analytics
+    analytics -->|"idempotent on (device, kind, as_of)"| forecasts
+    analytics -.->|"opt-in ntfy push"| ntfy["ntfy topic"]
     telemetry --> grafana
     dead --> grafana
+    forecasts --> grafana
 ```
 
 Everything above runs from one `docker compose up`. The simulator is the
@@ -63,6 +69,13 @@ and YAML in the repo, so a fresh clone produces the identical dashboard with
 zero manual clicks — and every panel's SQL is mirrored in
 [dashboard-queries.md](dashboard-queries.md), which a test enforces, so the
 queries stay reviewable outside the dashboard JSON.
+
+**A small analytics service** over the same database — a pure forecasting
+core (segment detection, a robust stdlib-only linear fit, honest no-forecast
+statuses) wrapped in a poll-driven loop that writes idempotent forecast rows
+and alert decisions. Alerts fire on the *forecast horizon* ("empty in under
+2 days"), not raw thresholds. It reuses the ops surface (healthz/metrics)
+the ingestion service established. See [analytics.md](analytics.md).
 
 **Docker Compose** for orchestration, treated as a first-class engineering
 requirement rather than a convenience: the promise is that a stranger clones
@@ -122,5 +135,6 @@ never becomes a fork of the stack. See
 - [message-contract.md](message-contract.md) — the wire format, topic tree, and versioning policy
 - [ingestion.md](ingestion.md) — layering, delivery semantics, failure behavior
 - [storage.md](storage.md) — hypertable, continuous aggregates, migrations
+- [analytics.md](analytics.md) — the forecast model, its derived tolerances, and its honesty rules
 - [dashboard-queries.md](dashboard-queries.md) — every panel's SQL, with rationale
 - [hardware-bridge.md](hardware-bridge.md) — pointing a real ESP32 pod at the stack
