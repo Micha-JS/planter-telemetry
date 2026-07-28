@@ -74,6 +74,10 @@ def _initial_state(seed: str) -> tuple[float, float]:
 
 
 async def _insert(dsn: str, readings: list[TelemetryV1]) -> None:
+    """Seed telemetry AND the device roster, exactly as ingestion does for
+    every reading — forecasts_latest is roster-scoped (migration 0010), and a
+    device with telemetry but no `devices` row is a state the pipeline cannot
+    produce."""
     async with (
         await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn,
         conn.cursor() as cursor,
@@ -83,6 +87,13 @@ async def _insert(dsn: str, readings: list[TelemetryV1]) -> None:
             " (device_id, measured_at, water_level, battery_voltage, schema_version)"
             " VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
             [(r.device_id, r.measured_at, r.water_level, r.battery_voltage, 1) for r in readings],
+        )
+        await cursor.executemany(
+            "INSERT INTO devices (device_id, first_seen, last_seen) VALUES (%s, %s, %s)"
+            " ON CONFLICT (device_id) DO UPDATE SET"
+            " first_seen = LEAST(devices.first_seen, EXCLUDED.first_seen),"
+            " last_seen  = GREATEST(devices.last_seen, EXCLUDED.last_seen)",
+            [(r.device_id, r.measured_at, r.measured_at) for r in readings],
         )
 
 
@@ -96,6 +107,11 @@ async def _rows(dsn: str, query: str, params: tuple[Any, ...] = ()) -> Snapshot:
     async with await psycopg.AsyncConnection.connect(dsn) as conn:
         cursor = await conn.execute(query.encode(), params)
         return [tuple(row) for row in await cursor.fetchall()]
+
+
+async def _execute(dsn: str, statement: str) -> None:
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        await conn.execute(statement.encode())
 
 
 async def _forecast_row(dsn: str, kind: str) -> tuple[Any, ...]:
@@ -210,6 +226,101 @@ async def test_refill_resets_the_forecast_honestly(clean_db: str) -> None:
     assert crosses_at > as_of
 
 
+async def test_pass_skips_the_work_when_the_watermark_has_not_moved(clean_db: str) -> None:
+    """The cheap path: an unmoved fleet watermark cannot change any forecast
+    (the model is a pure function of the window), so the pass must not re-read
+    and re-fit. Proven by deleting the forecasts first — a pass that did the
+    work would write them straight back."""
+    await _insert(clean_db, _readings(_steady(), "skip", 288))
+    watermark = await run_pass(_settings(clean_db), Counters(), Gauges())
+    assert watermark is not None
+    await _execute(clean_db, "DELETE FROM forecasts")
+
+    counters = Counters()
+    assert await run_pass(_settings(clean_db), counters, Gauges(), since=watermark) == watermark
+    assert counters.forecasts_written == 0
+    assert await _rows(clean_db, "SELECT count(*) FROM forecasts") == [(0,)]
+
+    # ... and a watermark that HAS moved is never skipped.
+    await _insert(clean_db, _readings(_steady(), "skip", 300)[288:])
+    counters = await _pass(clean_db)
+    assert counters.forecasts_written == 2
+
+
+async def test_device_going_dark_loses_its_forecast(clean_db: str) -> None:
+    """A planter that stops reporting must not keep a green forecast. Its
+    STALE status lands at the SAME watermark the healthy one used, so a
+    conflict-and-drop write would leave the dashboard showing a frozen 'ok'
+    and a never-decreasing horizon for a device that is gone."""
+    # Slow enough that 24 h of device time cannot reach the target from any
+    # seeded starting level: the subject is staleness, not dryness.
+    await _insert(clean_db, _readings(_steady(depletion_pct_per_hour=0.5), "dark", 288))
+    await _pass(clean_db)
+    status, crosses_at, _, as_of, _ = await _forecast_row(clean_db, "water")
+    assert status == "ok"
+    assert crosses_at is not None
+
+    # A second planter keeps reporting, so the FLEET watermark advances well
+    # past planter-00's staleness limit while planter-00's own stands still.
+    last_at = START + 287 * STEP
+    alive = [
+        TelemetryV1(
+            device_id="planter-01",
+            measured_at=last_at + (i + 1) * STEP,
+            water_level=round(80.0 - 0.5 * i, 1),
+            battery_voltage=3.9,
+        )
+        for i in range(60)  # 5 h of device time, far beyond 6 x the 5-min cadence
+    ]
+    await _insert(clean_db, alive)
+    await _pass(clean_db)
+
+    status, crosses_at, slope, stale_as_of, _ = await _forecast_row(clean_db, "water")
+    assert status == "stale"
+    assert crosses_at is None and slope is None
+    assert stale_as_of == as_of  # the same watermark, updated in place
+    assert await _rows(
+        clean_db,
+        "SELECT horizon_seconds FROM forecasts_latest"
+        " WHERE device_id = 'planter-00' AND kind = 'water'",
+    ) == [(None,)]
+
+
+async def test_no_crossing_status_reports_no_horizon(clean_db: str) -> None:
+    """Postgres GREATEST ignores NULLs, so a naive clamp turns 'no crossing'
+    into '0 days left' — which is what a bone-dry tank reads as. The view has
+    to say NULL, and the panels sort those to the top."""
+    await _insert(clean_db, _readings(_steady(), "warmup", 10))
+    await _pass(clean_db)
+    assert await _rows(
+        clean_db,
+        "SELECT kind, status, horizon_seconds FROM forecasts_latest"
+        " WHERE device_id = 'planter-00' ORDER BY kind",
+    ) == [
+        ("battery", "insufficient_points", None),
+        ("water", "insufficient_points", None),
+    ]
+
+    # The clamp itself survives: a planter already at target is dry NOW, and
+    # that is an honest zero, not a NULL.
+    dry = [
+        TelemetryV1(
+            device_id="planter-01",
+            measured_at=START + i * STEP,
+            water_level=5.0,
+            battery_voltage=3.9,
+        )
+        for i in range(10)
+    ]
+    await _insert(clean_db, dry)
+    await _pass(clean_db)
+    assert await _rows(
+        clean_db,
+        "SELECT status, horizon_seconds FROM forecasts_latest"
+        " WHERE device_id = 'planter-01' AND kind = 'water'",
+    ) == [("at_or_below_target", 0.0)]
+
+
 async def test_fresh_device_gets_no_forecast(clean_db: str) -> None:
     await _insert(clean_db, _readings(_steady(), "fresh", 10))
     counters = await _pass(clean_db)
@@ -322,6 +433,16 @@ async def _get_json(port: int, path: str) -> tuple[int, dict[str, object]]:
         return response.status, body
 
 
+async def _get_text(port: int, path: str) -> tuple[int, str]:
+    """/metrics is Prometheus text, not JSON — the reason the probe below
+    cannot reuse _get_json."""
+    async with (
+        aiohttp.ClientSession() as session,
+        session.get(f"http://127.0.0.1:{port}{path}") as response,
+    ):
+        return response.status, await response.text()
+
+
 def _dead_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -344,8 +465,12 @@ async def test_service_healthz_healthy_then_shutdown(clean_db: str) -> None:
         assert body["last_pass_ok"] is True
         assert counters.passes == 1
 
-        metrics_status, _ = await _get_json(health.ops_port, "/healthz")
+        # /metrics on the RUNNING service: registry wiring and route
+        # registration, neither of which the pure ops unit tests can prove.
+        metrics_status, metrics_body = await _get_text(health.ops_port, "/metrics")
         assert metrics_status == 200
+        assert "planter_analytics_passes_total 1.0" in metrics_body
+        assert "planter_analytics_devices_forecast 0.0" in metrics_body  # the gauge split
     finally:
         stop.set()
         await asyncio.wait_for(task, timeout=15)

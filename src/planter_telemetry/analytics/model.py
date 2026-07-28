@@ -62,7 +62,7 @@ class Metric:
     max_fit_points: int  # Theil-Sen is O(n^2); hard cap, most recent points win
     lookback_seconds: float  # window handed to the fit; exceeds the longest segment
     gap_factor: float  # x median inter-sample interval => segment break
-    stale_after_seconds: float  # newest sample older than this vs now_data_time => STALE
+    stale_after_seconds: float  # FLOOR for the staleness limit; the cadence rule may raise it
     max_horizon_seconds: float  # crossings further out than this are BEYOND_HORIZON
     alert_horizon_seconds: float  # horizon at or below this => alert fires
 
@@ -163,7 +163,7 @@ class Fit:
     points: int  # points actually fitted (<= max_fit_points)
     segment_points: int  # points in the whole segment
     span_seconds: float  # span of the fitted points
-    truncated: bool  # segment reached the lookback edge
+    truncated: bool  # segment began at the lookback edge, so its true span may be longer
 
 
 @dataclass(frozen=True)
@@ -201,6 +201,18 @@ def _is_valid_series(samples: Sequence[Sample]) -> bool:
     return all(a.at < b.at for a, b in itertools.pairwise(samples))
 
 
+def cadence_seconds(samples: Sequence[Sample]) -> float | None:
+    """The observed check-in interval: median gap between consecutive samples.
+
+    One definition, three users — the segmenter's gap rule, the staleness
+    rule, and the window-edge test behind `truncated` — so all three adapt to
+    the fleet's actual cadence instead of to a configured one. None when
+    there is no positive gap to measure (fewer than two samples).
+    """
+    deltas = [d for a, b in itertools.pairwise(samples) if (d := (b.at - a.at).total_seconds()) > 0]
+    return statistics.median(deltas) if deltas else None
+
+
 def split_segments(
     samples: Sequence[Sample], *, jump: float, gap_factor: float
 ) -> list[list[Sample]]:
@@ -224,8 +236,8 @@ def split_segments(
     series = list(samples)
     if len(series) < 2:
         return [series] if series else []
-    deltas = [d for a, b in itertools.pairwise(series) if (d := (b.at - a.at).total_seconds()) > 0]
-    gap_limit = statistics.median(deltas) * gap_factor if deltas else math.inf
+    cadence = cadence_seconds(series)
+    gap_limit = cadence * gap_factor if cadence is not None else math.inf
 
     segments: list[list[Sample]] = []
     start = 0
@@ -326,8 +338,20 @@ def _crossing(
     return anchor + timedelta(hours=hours)
 
 
-def forecast(samples: Sequence[Sample], metric: Metric, now_data_time: datetime) -> Forecast:
+def forecast(
+    samples: Sequence[Sample],
+    metric: Metric,
+    now_data_time: datetime,
+    *,
+    window_start: datetime | None = None,
+) -> Forecast:
     """The one entry point: called once per (device, metric) per pass.
+
+    `window_start` is the cutoff `samples` were read from, and is used for
+    exactly one thing: deciding whether the lookback edge — rather than a
+    refill — chose where the newest segment begins (the `truncated` flag).
+    Omitting it means "unknown", and a lone segment is then reported as
+    truncated, the conservative answer.
 
     Status precedence, tested as a table:
 
@@ -370,7 +394,18 @@ def forecast(samples: Sequence[Sample], metric: Metric, now_data_time: datetime)
         return no_crossing(Status.INVALID_SERIES, as_of, value)
 
     newest = samples[-1]
-    if (now_data_time - newest.at).total_seconds() > metric.stale_after_seconds:
+    cadence = cadence_seconds(samples)
+    # Staleness adapts to the observed cadence for the same reason the gap
+    # rule does: hardware that deep-sleeps for 45 minutes is not "dark" at
+    # 30. The constant is a floor, so the demo (5 device-minutes between
+    # samples, x6 = the same 1800 s) is unchanged, while a slow fleet stops
+    # reporting every pod but the newest reporter as STALE — `now_data_time`
+    # is the FLEET watermark, so on a slow fleet every other device is
+    # legitimately one cadence behind it.
+    stale_after = metric.stale_after_seconds
+    if cadence is not None:
+        stale_after = max(stale_after, cadence * metric.gap_factor)
+    if (now_data_time - newest.at).total_seconds() > stale_after:
         return no_crossing(Status.STALE, newest.at, newest.value)
     if newest.value <= metric.target:
         return Forecast(
@@ -397,9 +432,20 @@ def forecast(samples: Sequence[Sample], metric: Metric, now_data_time: datetime)
     fit = theil_sen(fit_samples)
     if fit is None:  # unreachable past the gates above; stay total anyway
         return no_crossing(Status.INSUFFICIENT_POINTS, newest.at, newest.value)
-    # A lone segment starts at the window's first sample, so the window edge —
-    # not a refill — decided where it begins: its true span may be longer.
-    fit = replace(fit, segment_points=len(segment), truncated=len(segments) == 1)
+    # A lone segment starts at the window's first sample — but only when that
+    # sample sits AT the window edge did the edge, rather than the device's
+    # own history, decide where the segment begins. A device younger than the
+    # lookback (every device in a fresh deployment, and every battery series
+    # until the demo is 35 days old) has one segment whose start is its
+    # first-ever reading; calling that truncated claims we know less than we
+    # do. "At the edge" is one gap-limit of slack, the same threshold the
+    # segmenter uses: a larger hole than that would have split the segment
+    # anyway had the older data been there.
+    edge_slack = cadence * metric.gap_factor if cadence is not None else 0.0
+    reached_edge = (
+        window_start is None or (segment[0].at - window_start).total_seconds() <= edge_slack
+    )
+    fit = replace(fit, segment_points=len(segment), truncated=len(segments) == 1 and reached_edge)
 
     crosses_at = _crossing(fit.value_at_anchor, metric.target, fit.slope_per_hour, fit.anchor_at)
     if crosses_at is None:

@@ -125,8 +125,8 @@ either way because idempotency does not depend on batching.
   "starting" (the compose healthcheck's `start_period` absorbs it) and
   "reconnecting", and the body carries both flags plus the counters for
   diagnosis. `/metrics` on the same port exposes the counters in Prometheus
-  text format as a live view (`ops.CountersCollector`), never as separate
-  bookkeeping.
+  text format as a live view (`planter_telemetry.ops.CountersCollector`, the
+  server shared with the analytics service), never as separate bookkeeping.
 
 ## Proof
 

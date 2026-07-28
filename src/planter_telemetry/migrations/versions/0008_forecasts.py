@@ -30,6 +30,13 @@ No retention, matching 0005's posture: the history is the demo. A production
 deployment would trim on computed_at — the wall clock is the right clock for
 retention, unlike for the forecast arithmetic.
 
+Two claims above were later corrected, in 0010: the view's horizon clamp
+(`greatest` ignores NULLs, so no-crossing statuses read as a confident zero)
+and its DISTINCT ON scan (which walks the whole history, not one entry per
+group). The writer also upserts on a status change rather than ignoring the
+conflict — see docs/analytics.md — because a device that goes dark keeps its
+watermark.
+
 Downgrade is deliberately not implemented: the chain is forward-only past
 0003 (see 0003's docstring).
 

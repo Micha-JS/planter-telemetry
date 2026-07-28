@@ -41,11 +41,17 @@ The M7 analytics tables follow the same standards with the same reasoning.
 `forecasts` keys on `(device_id, kind, as_of)` where `as_of` is the
 per-device data-time watermark that fed the fit — the exact analogue of
 telemetry's `(device_id, measured_at)`, so re-running an analytics pass over
-unchanged data inserts nothing. History is append-only (forecast evolution
-is the dashboard's forecast-vs-actual story); `forecasts_latest` is the
-`DISTINCT ON` view the panels read, deriving the horizon as
-`greatest(crosses_at − as_of, 0)`. Deliberately *not* a hypertable: a
-handful of rows per pass read back via a backwards primary-key scan — chunk
+unchanged data writes nothing. The conflict clause updates rather than
+ignores, gated on the status having changed: a device that goes dark keeps
+its watermark, so its `stale` forecast carries the same key as the last
+healthy one and would otherwise be dropped — leaving the dashboard showing a
+frozen "ok" for a planter that stopped reporting. History is otherwise
+append-only (forecast evolution is the dashboard's forecast-vs-actual
+story); `forecasts_latest` (migration 0010) is the view the panels read, one
+primary-key descent per (device, kind) rather than a scan of the whole
+history, with the horizon `NULL` for the statuses that carry no crossing and
+clamped at zero for the ones that do. Deliberately *not* a hypertable: a
+handful of rows per pass read back through the primary key — chunk
 machinery would cost overhead and buy nothing. `alert_events` records alert
 *decisions* (fired/cleared, before delivery is attempted) and doubles as the
 transition rule's durable state. Both migrations (`0008`, `0009`) carry the

@@ -19,18 +19,17 @@ import signal
 import time
 from contextlib import suppress
 from dataclasses import asdict, dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 
 from planter_telemetry.analytics.config import AnalyticsSettings
-from planter_telemetry.analytics.db import Store
+from planter_telemetry.analytics.db import WINDOW_KINDS, Store
 from planter_telemetry.analytics.model import (
     AlertState,
     AlertTransition,
     Forecast,
     Metric,
-    Sample,
     Status,
     alert_transition,
     forecast,
@@ -74,7 +73,13 @@ def _alert_title(device_id: str, kind: str) -> str:
 
 def _alert_message(device_id: str, fc: Forecast, horizon_seconds: float) -> str:
     days = horizon_seconds / 86400.0
-    crosses = fc.crosses_at.strftime("%Y-%m-%d %H:%M UTC") if fc.crosses_at else "now"
+    # Converted, not just labelled: psycopg hands back timestamptz in the
+    # connection session's TimeZone, which is only UTC by accident of how the
+    # compose database happens to be configured. A push that says "18:00 UTC"
+    # about a 13:00-UTC moment is worse than no timestamp at all.
+    crosses = "now"
+    if fc.crosses_at is not None:
+        crosses = fc.crosses_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
     noun = "empty" if fc.kind == "water" else "below charge threshold"
     return f"{fc.kind} {noun} in {days:.1f} days of device time ({crosses})"
 
@@ -134,12 +139,32 @@ async def _handle_alert(
         logger.info("alert_cleared", extra=extra)
 
 
-async def run_pass(settings: AnalyticsSettings, counters: Counters, gauges: Gauges) -> None:
+async def run_pass(
+    settings: AnalyticsSettings,
+    counters: Counters,
+    gauges: Gauges,
+    *,
+    since: datetime | None = None,
+) -> datetime | None:
     """One analytics pass: read the window, forecast every (device, metric),
     write idempotently, apply alert transitions. Integration tests call this
     directly — it owns its connection and is safe to re-run any number of
-    times over the same data (the done-criterion)."""
+    times over the same data (the done-criterion).
+
+    Returns the data-time watermark this pass saw (None on an empty
+    database). Handing it back as `since` on the next call turns a pass over
+    an unmoved fleet watermark into a single round trip: the model is a pure
+    function of the window, so unchanged data cannot change a forecast, and
+    at the poll intervals this service runs most passes are exactly that. The
+    parameter defaults to None so callers that want the full re-derivation —
+    every test that asserts idempotency — get it by saying nothing.
+    """
     metrics = settings.metrics()
+    missing = [metric.kind for metric in metrics if metric.kind not in WINDOW_KINDS]
+    if missing:
+        # A programming error, caught before it can silently forecast one
+        # metric's samples against another's constants.
+        raise ValueError(f"no telemetry column for metric kind(s): {sorted(missing)}")
     store = await Store.connect(settings.db_dsn)
     try:
         now_data = await store.data_now()
@@ -149,17 +174,25 @@ async def run_pass(settings: AnalyticsSettings, counters: Counters, gauges: Gaug
             # the wrong answer.
             gauges.devices_forecast = 0
             logger.info("pass_complete", extra={"devices": 0, "written": 0, "empty": True})
-            return
-        lookback = max(metric.lookback_seconds for metric in metrics)
-        window = await store.load_window(now_data - timedelta(seconds=lookback))
+            return None
+        if since is not None and now_data <= since:
+            logger.info("pass_skipped", extra={"data_now": now_data.isoformat()})
+            return now_data
+        # One read at the earliest cutoff any metric asks for; each metric
+        # then sees exactly its own window (water's 10 days is a real bound,
+        # not decoration). A query per metric would cost a second full scan
+        # to save a list comprehension.
+        metric_windows = [
+            (metric, now_data - timedelta(seconds=metric.lookback_seconds)) for metric in metrics
+        ]
+        longest = min(window_start for _, window_start in metric_windows)
+        window = await store.load_window(longest)
         alert_states = await store.latest_alert_states()
         written = 0
-        for device_id, rows in window.items():
-            for metric, samples in (
-                (metrics[0], [Sample(at, water) for at, water, _ in rows]),
-                (metrics[1], [Sample(at, battery) for at, _, battery in rows]),
-            ):
-                fc = forecast(samples, metric, now_data)
+        for device_id, by_kind in window.items():
+            for metric, window_start in metric_windows:
+                samples = [s for s in by_kind[metric.kind] if s.at > window_start]
+                fc = forecast(samples, metric, now_data, window_start=window_start)
                 if fc.status is Status.NOT_DEPLETING and metric.kind == "water":
                     # Impossible in-segment by construction (water depletion
                     # is monotone): a segmenter bug signal, not weather.
@@ -181,6 +214,7 @@ async def run_pass(settings: AnalyticsSettings, counters: Counters, gauges: Gaug
             "pass_complete",
             extra={"devices": len(window), "written": written, "data_now": now_data.isoformat()},
         )
+        return now_data
     finally:
         await store.close()
 
@@ -226,11 +260,15 @@ async def run(
         # Once at startup, not per pass. Deliberately no URL in the other
         # branch either: the topic URL is a write capability.
         logger.info("notifications_disabled", extra={})
+    # The fleet watermark the last successful pass saw. A failed pass leaves
+    # it untouched, so the retry re-derives everything rather than trusting a
+    # half-finished pass.
+    last_data_now: datetime | None = None
     try:
         while not stop.is_set():
             began = time.monotonic()
             try:
-                await run_pass(settings, counters, gauges)
+                last_data_now = await run_pass(settings, counters, gauges, since=last_data_now)
                 counters.passes += 1
                 health.last_pass_ok = True
             except (psycopg.Error, OSError) as exc:

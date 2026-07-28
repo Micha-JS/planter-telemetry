@@ -9,7 +9,7 @@ from datetime import datetime
 import psycopg
 from psycopg.rows import TupleRow
 
-from planter_telemetry.analytics.model import AlertState, Forecast
+from planter_telemetry.analytics.model import AlertState, Forecast, Sample
 
 _SELECT_DATA_NOW = "SELECT max(measured_at) FROM telemetry"
 
@@ -24,8 +24,24 @@ WHERE measured_at > %s
 ORDER BY device_id, measured_at
 """
 
+# Which metric kind each value column carries. The pairing lives here, next
+# to the SELECT whose column order it describes, so that no caller can pair a
+# Metric with a column by position — reordering (or extending) the service's
+# metric tuple must never fit water's samples against battery's constants.
+WINDOW_KINDS: tuple[str, ...] = ("water", "battery")
+
 # The primary key is the idempotency key: a pass over unchanged data
-# conflicts on (device_id, kind, as_of) and inserts nothing.
+# re-derives the same status at the same watermark and writes nothing.
+#
+# The conflict clause updates rather than ignores, gated on the status having
+# actually changed, because a device that goes dark keeps its watermark: its
+# STALE forecast carries the same (device_id, kind, as_of) as the last
+# healthy one, so DO NOTHING left forecasts_latest showing a frozen "ok" with
+# a never-decreasing horizon for a planter that stopped reporting days ago —
+# the dashboard's single worst lie. Gating on status keeps every other
+# guarantee intact: unchanged data changes no row (the replay invariant), and
+# a late out-of-order reading still does not rewrite a forecast, because it
+# moves neither the watermark nor the status.
 _INSERT_FORECAST = """\
 INSERT INTO forecasts (
     device_id, kind, as_of, status, target_value, latest_value,
@@ -34,7 +50,21 @@ INSERT INTO forecasts (
     fit_span_seconds, truncated
 )
 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-ON CONFLICT (device_id, kind, as_of) DO NOTHING
+ON CONFLICT (device_id, kind, as_of) DO UPDATE SET
+    status              = EXCLUDED.status,
+    target_value        = EXCLUDED.target_value,
+    latest_value        = EXCLUDED.latest_value,
+    crosses_at          = EXCLUDED.crosses_at,
+    crosses_at_earliest = EXCLUDED.crosses_at_earliest,
+    crosses_at_latest   = EXCLUDED.crosses_at_latest,
+    slope_per_hour      = EXCLUDED.slope_per_hour,
+    residual_mad        = EXCLUDED.residual_mad,
+    fit_points          = EXCLUDED.fit_points,
+    segment_points      = EXCLUDED.segment_points,
+    fit_span_seconds    = EXCLUDED.fit_span_seconds,
+    truncated           = EXCLUDED.truncated,
+    computed_at         = now()
+WHERE forecasts.status IS DISTINCT FROM EXCLUDED.status
 """
 
 # The transition rule's durable state: latest decision per (device, kind),
@@ -89,13 +119,22 @@ class Store:
         row = await cursor.fetchone()
         return row[0] if row is not None else None
 
-    async def load_window(self, cutoff: datetime) -> dict[str, list[tuple[datetime, float, float]]]:
-        """(measured_at, water_level, battery_voltage) per device, in device-
-        time order, for everything newer than the cutoff."""
+    async def load_window(self, cutoff: datetime) -> dict[str, dict[str, list[Sample]]]:
+        """Samples per device per metric kind, in device-time order, for
+        everything newer than the cutoff.
+
+        Keyed by kind (see WINDOW_KINDS) rather than returned as raw rows:
+        the caller asks for the kind its Metric names and cannot accidentally
+        read a column by position.
+        """
         cursor = await self._conn.execute(_SELECT_WINDOW, (cutoff,))
-        series: dict[str, list[tuple[datetime, float, float]]] = {}
+        series: dict[str, dict[str, list[Sample]]] = {}
         for device_id, measured_at, water, battery in await cursor.fetchall():
-            series.setdefault(device_id, []).append((measured_at, water, battery))
+            by_kind = series.get(device_id)
+            if by_kind is None:
+                by_kind = series[device_id] = {kind: [] for kind in WINDOW_KINDS}
+            by_kind["water"].append(Sample(measured_at, water))
+            by_kind["battery"].append(Sample(measured_at, battery))
         return series
 
     async def latest_alert_states(self) -> dict[tuple[str, str], AlertState]:
@@ -106,8 +145,8 @@ class Store:
         }
 
     async def insert_forecast(self, device_id: str, fc: Forecast) -> bool:
-        """Insert one forecast; False means this watermark was already
-        recorded (the idempotent no-op)."""
+        """Record one forecast; False means this watermark already carried
+        this status (the idempotent no-op)."""
         if fc.as_of is None:  # NO_DATA: nothing to key a row on
             return False
         fit = fc.fit

@@ -203,9 +203,13 @@ truncated for display. The full payload stays in the table.
 ## Forecasts row
 
 The M7 analytics service writes one forecast row per (device, kind,
-device-time watermark); `forecasts_latest` is the newest per (device, kind)
-with the horizon derived as `greatest(crosses_at - as_of, 0)` — clamped so
-"already at target" reads as 0 days left, never negative. All three panels
+device-time watermark); `forecasts_latest` is the newest per (device, kind),
+with the horizon `NULL` whenever the status carries no crossing and
+`greatest(crosses_at - as_of, 0)` when it does — clamped so "already at
+target" reads as 0 days left, never negative, and left NULL so a
+warming-up planter never reads as one that is dry right now. (`greatest`
+alone would not do it: Postgres `GREATEST` *ignores* NULL arguments, so the
+clamp turned every no-crossing row into a confident 0.00.) All three panels
 anchor on device time (`as_of` IS `measured_at`-time), so `$__timeFilter`
 applies where a time axis exists; the model and its honesty rules are in
 [analytics.md](analytics.md).

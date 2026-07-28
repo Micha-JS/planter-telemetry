@@ -388,6 +388,67 @@ def test_battery_crossing_within_eight_percent(seed: str) -> None:
     assert abs((fc.crosses_at - true_crossing).total_seconds()) <= 0.08 * horizon
 
 
+def test_staleness_adapts_to_a_slow_check_in_cadence() -> None:
+    """`now_data_time` is the FLEET watermark, so on hardware that deep-sleeps
+    for an hour every pod except the most recent reporter is legitimately a
+    cadence behind it. A fixed 30-minute rule would report a healthy fleet as
+    dark and never forecast it; the constant is a floor, and the observed
+    cadence (x gap_factor, as in the segmenter) raises it."""
+    hourly = _ramp(60, 80.0, -0.5, step=timedelta(hours=1))
+    assert forecast(hourly, WATER, hourly[-1].at + timedelta(hours=2)).status is not Status.STALE
+    # Past 6 x the observed one-hour cadence: dark by the same rule that
+    # breaks a segment on an implausible gap.
+    assert forecast(hourly, WATER, hourly[-1].at + timedelta(hours=7)).status is Status.STALE
+
+
+def test_dense_cadence_keeps_the_configured_staleness_floor() -> None:
+    """The adaptive rule must not shorten the limit: at the demo's 5-minute
+    cadence 6 x 300 s is exactly the 1800 s floor, and dense replay data must
+    not make a device 'dark' after a minute."""
+    dense = _ramp(60, 80.0, -2.0, step=timedelta(seconds=10))
+    assert forecast(dense, WATER, dense[-1].at + timedelta(seconds=1700)).status is not Status.STALE
+    assert forecast(dense, WATER, dense[-1].at + timedelta(seconds=1900)).status is Status.STALE
+
+
+def test_truncated_means_the_window_edge_not_a_lone_segment() -> None:
+    """`truncated` is a claim about the WINDOW: that the lookback edge, not a
+    refill, chose where the segment begins. A device younger than the window
+    has exactly one segment starting at its own first-ever reading — calling
+    that truncated claims we know less than we do, and in a fresh deployment
+    that is every battery series."""
+    samples = _ramp(300, 80.0, -2.0)
+
+    # Window opened three days before the device's first reading: nothing was
+    # clipped, and the fit's span is the device's whole life.
+    fc = forecast(samples, WATER, _fresh(samples), window_start=samples[0].at - timedelta(days=3))
+    assert fc.fit is not None
+    assert fc.fit.truncated is False
+
+    # The series runs right up to the edge: older data may well exist beyond
+    # it, so the span is a lower bound.
+    fc = forecast(samples, WATER, _fresh(samples), window_start=samples[0].at - STEP)
+    assert fc.fit is not None
+    assert fc.fit.truncated is True
+
+    # No window given: the conservative answer, since the caller has told us
+    # nothing about where the data was cut.
+    fc = forecast(samples, WATER, _fresh(samples))
+    assert fc.fit is not None
+    assert fc.fit.truncated is True
+
+
+def test_truncated_is_false_when_a_refill_starts_the_segment() -> None:
+    """Two segments means the newest one starts at a refill, whatever the
+    window did."""
+    old = _ramp(300, 80.0, -2.0)
+    hours = STEP.total_seconds() / 3600.0
+    refilled = [Sample(old[-1].at + (i + 1) * STEP, 95.0 - 2.0 * i * hours) for i in range(60)]
+    samples = old + refilled
+    fc = forecast(samples, WATER, _fresh(samples), window_start=samples[0].at - STEP)
+    assert fc.fit is not None
+    assert fc.fit.truncated is False
+
+
 def test_crossing_is_utc_aware() -> None:
     fc = forecast(_ramp(300, 80.0, -2.0), WATER, START + 299 * STEP)
     assert fc.crosses_at is not None

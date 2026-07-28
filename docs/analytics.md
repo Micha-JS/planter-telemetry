@@ -78,7 +78,7 @@ Every forecast carries a status; only three statuses carry a crossing time
 |---|---|---|
 | `no_data` | no samples in the lookback window | no |
 | `invalid_series` | unsorted / duplicate timestamps / non-finite — the core never trusts its input | no |
-| `stale` | newest sample too old vs the fleet's data-time "now" (30 min default) | no |
+| `stale` | newest sample too old vs the fleet's data-time "now" (30 min floor, raised to 6× the device's own observed cadence) | no |
 | `at_or_below_target` | already at/below target — dry NOW; checked before any fit gate | yes (horizon 0) |
 | `insufficient_points` | newest segment shorter than 36 (water) / 144 (battery) samples | no |
 | `insufficient_span` | fitted span under 3 h (water) / 12 h (battery) — dense replay data defeats a point count alone | no |
@@ -105,7 +105,17 @@ Hourly averaging smears a refill step across its bucket: the bucket
 containing the refill averages the two regimes and leaves *no step to
 detect* — the aggregate destroys exactly the signal segmentation depends
 on. The fit therefore reads raw `telemetry` (one query per pass, grouped in
-Python), which at demo volume costs nothing.
+Python by device *and metric kind*, so a metric is never paired with a
+column by position), which at demo volume costs nothing. One read covers
+both metrics at the longest lookback and each metric then sees exactly its
+own window — water's 10 days is a real bound, not a decorative constant.
+
+A pass whose fleet watermark has not advanced since the previous one skips
+straight out after a single `max(measured_at)`: the model is a pure
+function of the window, so unchanged data cannot change a forecast. On real
+hardware — a 5-minute check-in cadence against a 30-second pass interval —
+that is most passes, and the alternative is re-running an O(n²) fit per
+device to write nothing.
 
 ## Accuracy, derived rather than claimed
 
@@ -172,6 +182,18 @@ truth table, and its output is a queryable table the dashboard can show.
 - **A late out-of-order reading** older than a device's forecast watermark
   does not retrigger a fit; the marginally better forecast it would enable
   is dropped, keeping the idempotency key honest.
+- **A device that goes dark keeps its watermark**, so its `stale` forecast
+  shares a key with the last healthy one. The write is therefore an update
+  gated on the status changing — without it the dashboard would show a
+  frozen "ok" and an unchanging horizon for a planter that stopped
+  reporting days ago. Unchanged data still writes nothing.
+- **Staleness is a fleet-relative rule with an adaptive limit.** "Now" is
+  the newest `measured_at` in the fleet, so on hardware that deep-sleeps
+  for an hour every pod except the most recent reporter is legitimately a
+  cadence behind it; a fixed 30-minute rule would report a healthy fleet as
+  dark and never forecast it. The constant is a floor, raised to
+  `gap_factor ×` the device's observed cadence — the same threshold the
+  segmenter uses to call a hole implausible.
 - **Anomaly detection is out of scope** — leak and wick-failure baselines
   are the documented future work (see the plan), and nothing here blocks
   them: they would be new consumers of the same segments.
@@ -192,7 +214,12 @@ CI-verified (unit + testcontainers integration + compose smoke):
   the new segment's rate — never a negative or absurd rate, never the old
   tank's rate;
 - re-running an analytics pass over the same data window changes neither
-  `forecasts` nor `alert_events` (count and content);
+  `forecasts` nor `alert_events` (count and content), and a pass whose
+  watermark has not moved does no work at all (proven by deleting the rows
+  first: a pass that re-fitted would write them back);
+- a device that stops reporting loses its forecast — the status flips to
+  `stale` at the watermark it already occupies, and the view reports no
+  horizon rather than a frozen one;
 - an alert decision fires when a seeded fast-depleting device's horizon
   crosses the threshold, refuses to re-fire across a restart-equivalent
   pass, and clears after a refill (`make analytics-smoke` proves the same
