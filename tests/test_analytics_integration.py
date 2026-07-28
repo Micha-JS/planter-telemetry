@@ -74,17 +74,16 @@ def _initial_state(seed: str) -> tuple[float, float]:
 
 
 async def _insert(dsn: str, readings: list[TelemetryV1]) -> None:
-    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-        async with conn.cursor() as cursor:
-            await cursor.executemany(
-                "INSERT INTO telemetry"
-                " (device_id, measured_at, water_level, battery_voltage, schema_version)"
-                " VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                [
-                    (r.device_id, r.measured_at, r.water_level, r.battery_voltage, 1)
-                    for r in readings
-                ],
-            )
+    async with (
+        await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn,
+        conn.cursor() as cursor,
+    ):
+        await cursor.executemany(
+            "INSERT INTO telemetry"
+            " (device_id, measured_at, water_level, battery_voltage, schema_version)"
+            " VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            [(r.device_id, r.measured_at, r.water_level, r.battery_voltage, 1) for r in readings],
+        )
 
 
 async def _pass(dsn: str) -> Counters:
@@ -413,6 +412,6 @@ async def test_grafana_reader_can_execute_every_panel_query(clean_db: str) -> No
     queries = _panel_queries()
     assert len(queries) >= 10  # the dashboard genuinely was parsed
     async with await psycopg.AsyncConnection.connect(reader_dsn) as conn:
-        for title, raw_sql in queries:
+        for _title, raw_sql in queries:
             cursor = await conn.execute(_executable(raw_sql).encode())
             await cursor.fetchall()  # any missing grant/column raises here

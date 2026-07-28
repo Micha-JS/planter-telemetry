@@ -22,5 +22,5 @@ async def post_ntfy(url: str, title: str, message: str) -> str | None:
             if response.status // 100 != 2:
                 return f"ntfy returned HTTP {response.status}"
             return None
-    except Exception as exc:  # noqa: BLE001 - delivery is best-effort by design
+    except Exception as exc:  # delivery is best-effort by design
         return type(exc).__name__
