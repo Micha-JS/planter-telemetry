@@ -659,6 +659,79 @@
         "type": "postgres",
         "uid": "planter-timescaledb"
       },
+      "description": "Soonest forecast horizon per planter (water or battery, whichever crosses first), in days of DEVICE time. 'warming up' is a status, not a gap: fresh devices and just-refilled tanks have no fit yet (see the forecast detail table for the reason). Thresholds match the analytics alert horizon: red under 1 day, amber under 3.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "noValue": "warming up",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "d"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 19
+      },
+      "id": 11,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "/^days_left$/",
+          "values": true
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "planter-timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT d.device_id, min(f.horizon_seconds) / 86400.0 AS days_left FROM devices d LEFT JOIN forecasts_latest f ON f.device_id = d.device_id AND f.status IN ('ok', 'at_or_below_target') GROUP BY d.device_id ORDER BY d.device_id",
+          "refId": "A"
+        }
+      ],
+      "title": "Attention needed (days left)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "planter-timescaledb"
+      },
       "description": "Check-ins short of the deep-sleep schedule (12/hour at the default cadence), from telemetry_hourly. The newest, still-filling bucket is excluded via the device-timeline cutoff.",
       "fieldConfig": {
         "defaults": {
@@ -814,6 +887,211 @@
       ],
       "title": "Recent dead letters",
       "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
+      "id": 102,
+      "panels": [],
+      "title": "Forecasts",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "planter-timescaledb"
+      },
+      "description": "Forecast honesty, live: the horizon (right axis, days) ticks down at exactly one day per day of device time and resets upward when the owner refills — simulated owners refill at 5-25 % while the forecast target is 10 %, so 'the owner beat the forecast' is the correct outcome, not a bug. The battery forecast is where crossings actually land (recharge triggers at 3.0 V, below the 3.4 V target).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": 450000,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percent",
+          "displayName": "${__field.labels.metric}"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "d"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "planter-timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT as_of AS \"time\", 'days until empty' AS metric, greatest(EXTRACT(EPOCH FROM (crosses_at - as_of)), 0)::double precision / 86400.0 AS value FROM forecasts WHERE device_id = ${planter:sqlstring} AND kind = 'water' AND status IN ('ok', 'at_or_below_target') AND $__timeFilter(as_of) ORDER BY 1",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "planter-timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT measured_at AS \"time\", 'water level' AS metric, water_level AS value FROM telemetry WHERE device_id = ${planter:sqlstring} AND $__timeFilter(measured_at) ORDER BY 1",
+          "refId": "B"
+        }
+      ],
+      "title": "Forecast vs actual — $planter",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "planter-timescaledb"
+      },
+      "description": "Latest forecast per (device, kind), including the honest no-forecast statuses — 'insufficient_points' after a refill is an answer, not a hole. crosses_at_earliest/latest are the distribution-free confidence band on the fitted slope; target is a column so a historical row stays interpretable if the config is retuned.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "id": 13,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "planter-timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT f.device_id, f.kind, f.status, round(f.latest_value::numeric, 2) AS latest, round(f.target_value::numeric, 2) AS target, round((f.slope_per_hour * 24.0)::numeric, 3) AS change_per_day, round((f.horizon_seconds / 86400.0)::numeric, 2) AS days_left, f.crosses_at, f.crosses_at_earliest, f.crosses_at_latest, f.fit_points, round((f.fit_span_seconds / 3600.0)::numeric, 1) AS fit_hours, f.as_of FROM forecasts_latest f ORDER BY f.horizon_seconds NULLS FIRST, f.device_id, f.kind",
+          "refId": "A"
+        }
+      ],
+      "title": "Forecast detail (latest per device and kind)",
+      "type": "table"
     }
   ],
   "preload": false,
@@ -824,7 +1102,26 @@
     "iot"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {},
+        "datasource": {
+          "type": "postgres",
+          "uid": "planter-timescaledb"
+        },
+        "definition": "SELECT device_id FROM devices ORDER BY device_id",
+        "includeAll": false,
+        "label": "planter",
+        "multi": false,
+        "name": "planter",
+        "options": [],
+        "query": "SELECT device_id FROM devices ORDER BY device_id",
+        "refresh": 2,
+        "regex": "",
+        "sort": 0,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-1h",
