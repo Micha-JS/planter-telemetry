@@ -75,7 +75,10 @@ def db_dsn() -> Iterator[str]:
 def clean_db(db_dsn: str) -> str:
     """Per-test isolation on the shared session container."""
     with psycopg.connect(db_dsn, autocommit=True) as conn:
-        conn.execute("TRUNCATE telemetry, dead_letter, devices, ingest_events RESTART IDENTITY")
+        conn.execute(
+            "TRUNCATE telemetry, dead_letter, devices, ingest_events,"
+            " forecasts, alert_events RESTART IDENTITY"
+        )
         # The continuous aggregates are truncated explicitly: whether raw-
         # hypertable TRUNCATE writes cagg invalidations is undocumented, and
         # cagg TRUNCATE also resets the real-time watermark (fixed in 2.15) —
